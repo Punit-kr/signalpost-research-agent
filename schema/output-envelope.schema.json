@@ -1,0 +1,79 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/signalpost/output-envelope.schema.json",
+  "title": "Signalpost Company Research Result Envelope",
+  "description": "Output envelope schema reconciled with the official Builderr evaluation harness contract and OUTPUT_CONTRACT.md.",
+  "type": "object",
+  "required": ["organisation_number", "summary", "run", "claims", "evidence", "source_snapshots", "changes", "errors", "operations"],
+  "properties": {
+    "organisation_number": {"type": "string", "minLength": 1},
+    "summary": {"type": "string"},
+    "identity_anchor": {"type": ["object", "null"]},
+    "run": {
+      "type": "object",
+      "required": ["run_id", "started_at", "completed_at", "terminal_status"],
+      "properties": {
+        "run_id": {"type": "string"},
+        "started_at": {"type": "string", "format": "date-time"},
+        "completed_at": {"type": "string", "format": "date-time"},
+        "terminal_status": {"enum": ["completed", "failed"]}
+      },
+      "additionalProperties": true
+    },
+    "claims": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["field", "value", "availability", "confidence", "evidence_ids"],
+        "properties": {
+          "field": {"type": "string", "minLength": 1},
+          "value": {},
+          "availability": {"enum": ["available", "not_available", "blocked", "not_applicable", "ambiguous", "failed"]},
+          "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+          "evidence_ids": {"type": "array", "items": {"type": "string"}},
+          "reporting_period": {"type": ["string", "null"]},
+          "effective_date": {"type": ["string", "null"]},
+          "notes": {"type": ["string", "null"]}
+        },
+        "additionalProperties": true
+      }
+    },
+    "evidence": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "organisation_number", "source_url", "source_title", "source_class", "retrieved_at", "content_sha256", "claim_span", "identity_match_status", "confidence"],
+        "properties": {
+          "id": {"type": "string"},
+          "organisation_number": {"type": "string"},
+          "source_url": {"type": "string", "format": "uri"},
+          "source_title": {"type": "string"},
+          "source_class": {"type": "string"},
+          "retrieved_at": {"type": "string", "format": "date-time"},
+          "published_at": {"type": ["string", "null"]},
+          "effective_date": {"type": ["string", "null"]},
+          "content_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+          "snapshot_id": {"type": ["string", "null"]},
+          "claim_span": {"type": "string"},
+          "identity_match_status": {"type": "string"},
+          "confidence": {"type": "number", "minimum": 0, "maximum": 1}
+        },
+        "additionalProperties": true
+      }
+    },
+    "source_snapshots": {"type": "array", "items": {"type": "object"}},
+    "changes": {"type": "array", "items": {"type": "object"}},
+    "errors": {"type": "array", "items": {"type": "object"}},
+    "operations": {
+      "type": "object",
+      "required": ["requests", "runtime_ms", "third_party_cost_usd"],
+      "properties": {
+        "requests": {"type": "integer", "minimum": 0},
+        "runtime_ms": {"type": "integer", "minimum": 0},
+        "third_party_cost_usd": {"type": "number", "minimum": 0}
+      },
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": true
+}

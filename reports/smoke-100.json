@@ -1,0 +1,81 @@
+{
+  "artifacts": {
+    "database": null,
+    "database_note": "Ephemeral SQLite test state is omitted from the artifact archive; regenerate with the documented command.",
+    "fixtures": "signalpost-smoke-artifacts.zip:artifacts/smoke/fixtures-100.json",
+    "input": "signalpost-smoke-artifacts.zip:artifacts/smoke/input-100.jsonl",
+    "output_jsonl": "signalpost-smoke-artifacts.zip:artifacts/smoke/output-100.jsonl",
+    "run_report": "reports/smoke-100.json"
+  },
+  "bulk_sources": {
+    "entities": {
+      "content_sha256": "bf09b20f701c4a9184bcf3331e1111eeb3c4ea9f9b20f6bae226a10ee4a0303d",
+      "error": null,
+      "fetched_at": "2026-10-15T14:53:52Z",
+      "local_snapshot": true,
+      "source_class": "local_test_fixture",
+      "status": 200,
+      "url": "https://example.invalid/signalpost-test-fixture/registry.json"
+    }
+  },
+  "completed_at": "2026-10-15T14:53:52Z",
+  "duplicate_input_count": 0,
+  "input_count": 100,
+  "input_sha256": "7400eb3bc7fb630a3bbec6ef97b844df82bb8709094a8906cadfb0f0de9704ba",
+  "invalid_input_count": 0,
+  "limits": {
+    "max_external_cost_usd": 10.0,
+    "max_requests": 2000,
+    "max_runtime_seconds": 2700
+  },
+  "live_registry_coverage_verified": false,
+  "live_research_completed": false,
+  "mode": "offline_fixture_test",
+  "operations": {
+    "blocked_responses": 0,
+    "bytes_received": 0,
+    "cache_hits": 0,
+    "failures": 0,
+    "p95_latency_ms": 0.0,
+    "per_domain_caps": {
+      "other_domain": 12,
+      "registered_brreg_domain": 1900
+    },
+    "requests": 0,
+    "retries": 0,
+    "runtime_ms": 330,
+    "status_counts": {},
+    "third_party_cost_usd": 0.0,
+    "top_hosts": {}
+  },
+  "output_count": 100,
+  "qualification_note": "A local structural smoke test is not an official Builderr evaluation; qualification is not claimed.",
+  "qualification_passed": false,
+  "run_id": "smoke-100",
+  "source_counts": {
+    "business_address": 100,
+    "employees": 100,
+    "entity_kind": 100,
+    "foundation_date": 100,
+    "industry_classifications": 100,
+    "legal_form": 100,
+    "municipality": 100,
+    "official_name": 100,
+    "organisation_number": 100,
+    "registration_date": 100,
+    "registration_status": 100,
+    "summary_profile": 100,
+    "under_bankruptcy": 100,
+    "under_compulsory_liquidation": 100,
+    "under_liquidation": 100,
+    "vat_registered": 100
+  },
+  "started_at": "2026-10-15T14:53:52Z",
+  "synthetic_fixtures": true,
+  "terminal_status_counts": {
+    "completed": 100
+  },
+  "test_only": true,
+  "unique_output_count": 100,
+  "unique_valid_organisation_numbers": 100
+}

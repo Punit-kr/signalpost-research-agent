@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools==75.8.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "signalpost-company-agent"
+version = "0.1.0"
+description = "Competitive evidence-first company research agent for Norwegian organisation numbers"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "pypdf==5.9.0",
+    "jsonschema==4.26.0"
+]
+
+[project.scripts]
+signalpost-agent = "signalpost.cli:main"
+
+[tool.setuptools]
+packages = ["signalpost"]

@@ -1,0 +1,81 @@
+{
+  "artifacts": {
+    "database": "artifacts/smoke/state-1000/signalpost.sqlite3",
+    "html_report": "artifacts/smoke/report-1000.html",
+    "input": "artifacts/smoke/input-1000.jsonl",
+    "markdown_report": "artifacts/smoke/report-1000.md",
+    "output_jsonl": "artifacts/smoke/output-1000.jsonl",
+    "run_report": "reports/smoke-1000.json"
+  },
+  "bulk_sources": {
+    "entities": {
+      "content_sha256": "50f12dfa90444e1f6ebff108c291f378ecadc4bac349ab3dc4e30470729310a3",
+      "error": null,
+      "fetched_at": "2026-10-15T15:33:50Z",
+      "local_snapshot": true,
+      "source_class": "local_test_fixture",
+      "status": 200,
+      "url": "https://example.invalid/signalpost-test-fixture/registry.json"
+    }
+  },
+  "completed_at": "2026-10-15T15:34:05Z",
+  "duplicate_input_count": 0,
+  "input_count": 1000,
+  "input_sha256": "7333825aa4c1f4cd17be22760be9d7c1c1821c0b0cedfc68b7608aa6b161bd40",
+  "invalid_input_count": 0,
+  "limits": {
+    "max_external_cost_usd": 10.0,
+    "max_requests": 2000,
+    "max_runtime_seconds": 2700
+  },
+  "live_registry_coverage_verified": false,
+  "live_research_completed": false,
+  "mode": "offline_fixture_test",
+  "operations": {
+    "blocked_responses": 0,
+    "bytes_received": 0,
+    "cache_hits": 0,
+    "failures": 0,
+    "p95_latency_ms": 0.0,
+    "per_domain_caps": {
+      "other_domain": 12,
+      "registered_brreg_domain": 1900
+    },
+    "requests": 0,
+    "retries": 0,
+    "runtime_ms": 20890,
+    "status_counts": {},
+    "third_party_cost_usd": 0.0,
+    "top_hosts": {}
+  },
+  "output_count": 1000,
+  "qualification_note": "A local structural smoke test is not an official Builderr evaluation; qualification is not claimed.",
+  "qualification_passed": false,
+  "run_id": "signalpost-20261015T153349Z",
+  "source_counts": {
+    "business_address": 1000,
+    "employees": 1000,
+    "entity_kind": 1000,
+    "foundation_date": 1000,
+    "industry_classifications": 1000,
+    "legal_form": 1000,
+    "municipality": 1000,
+    "official_name": 1000,
+    "organisation_number": 1000,
+    "registration_date": 1000,
+    "registration_status": 1000,
+    "summary_profile": 1000,
+    "under_bankruptcy": 1000,
+    "under_compulsory_liquidation": 1000,
+    "under_liquidation": 1000,
+    "vat_registered": 1000
+  },
+  "started_at": "2026-10-15T15:33:50Z",
+  "synthetic_fixtures": true,
+  "terminal_status_counts": {
+    "completed": 1000
+  },
+  "test_only": true,
+  "unique_output_count": 1000,
+  "unique_valid_organisation_numbers": 1000
+}
