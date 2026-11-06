@@ -105,7 +105,7 @@ def normalize_registry_record(row: dict[str, Any], *, is_subentity: bool = False
     business_addr = _address(flat, "forretningsadresse") or _address(flat, "forretningsAdresse")
     postal_addr = _address(flat, "postadresse") or _address(flat, "postAdresse")
     location_addr = _address(flat, "beliggenhetsadresse") or _address(flat, "beliggenhetsAdresse")
-    main_parent = norm_text(_lookup(flat, "overordnetEnhet", "overordnet_enhet", "overordnetEnhet.organisasjonsnummer")) if is_subentity else None
+    main_parent = norm_text(_lookup(flat, "overordnetEnhet", "overordnet_enhet", "overordnetEnhet.organisasjonsnummer", "morselskap", "parent"))
     values: dict[str, Any] = {
         "official_name": name,
         "organisation_number": org,
@@ -127,6 +127,7 @@ def normalize_registry_record(row: dict[str, Any], *, is_subentity: bool = False
         "deleted_date": norm_text(_lookup(flat, "slettedato", "avregistreringsdato")),
         "employees": norm_text(_lookup(flat, "antallAnsatte", "antall_ansatte", "employees")),
         "municipality": norm_text(_lookup(flat, "forretningsadresse.kommunenummer", "forretningsadresse_kommunenummer", "kommunenummer")),
+        "latest_submitted_accounts": norm_text(_lookup(flat, "sisteInnsendteAarsregnskap", "siste_innsendte_aarsregnskap", "sisteInnsendteRegnskap", "latestSubmittedAccounts")),
         "parent_organisation_number": try_normalize_orgnr(main_parent) if main_parent else None,
         "group_flag": _truthy(_lookup(flat, "erIKonsern", "er_i_konsern")),
         "sector_code": norm_text(_lookup(flat, "institusjonellSektorkode.kode", "institusjonellSektorkode", "sektorkode")),

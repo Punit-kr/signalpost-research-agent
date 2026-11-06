@@ -71,17 +71,75 @@ def extract_financial_values(text: str) -> dict[str, dict[str, str]]:
             candidates = [line]
             if i + 1 < len(lines): candidates.append(line + " " + lines[i + 1])
             got = None
+            prior = None
             for cand in candidates:
-                matches = re.findall(r"(?<![A-Za-z])(?:NOK\s*)?([-−]?\d(?:[\d .\u00a0]*\d)?(?:[,\.]\d{1,2})?)(?![A-Za-z])", cand)
+                matches = re.findall(r"(?<![A-Za-z0-9])(?:NOK\s*)?([-−]?\d{1,3}(?:[ \u00a0]\d{3})*(?:[,\.]\d{1,2})?|[-−]?\d+)(?![A-Za-z0-9])", cand)
                 # Don't take years or embedded label numbers as accounting values.
                 clean = [m.strip() for m in matches if len(re.sub(r"\D", "", m)) >= 2 and not re.fullmatch(r"20\d{2}", re.sub(r"\D", "", m))]
                 if clean:
-                    got = clean[-1].replace("\u00a0", " ").strip()
+                    # In annual-account statements with comparative columns, the newest filing period
+                    # is listed in the first column, with the prior year following.
+                    got = clean[0].replace("\u00a0", " ").strip()
+                    if len(clean) >= 2:
+                        prior = clean[1].replace("\u00a0", " ").strip()
                     break
             if got:
-                out[field] = {"amount_as_printed": got, "label_as_printed": line[:180]}
+                res = {"amount_as_printed": got, "label_as_printed": line[:180]}
+                if prior:
+                    res["prior_year_amount"] = prior
+                out[field] = res
                 break
     return out
+
+
+def compare_financial_periods(
+    older_period: str,
+    newer_period: str,
+    older_values: dict[str, dict[str, str]],
+    newer_values: dict[str, dict[str, str]],
+    *,
+    older_period_months: int = 12,
+    newer_period_months: int = 12,
+) -> dict[str, Any]:
+    """Compare accounting figures between reporting periods.
+
+    Strict rules:
+    - Compare only periods of the same length (e.g. 12 months vs 12 months).
+    - Sequence comparisons strictly older to newer.
+    """
+    if older_period_months != newer_period_months:
+        return {
+            "comparable": False,
+            "reason": f"Reporting periods have different lengths ({older_period_months} months vs {newer_period_months} months); comparison invalid.",
+            "older_period": str(older_period),
+            "newer_period": str(newer_period),
+            "order": "older_to_newer",
+        }
+
+    comparisons: dict[str, dict[str, str]] = {}
+    for metric, n_data in newer_values.items():
+        o_data = older_values.get(metric)
+        if not o_data:
+            continue
+        o_val = o_data.get("amount_as_printed")
+        n_val = n_data.get("amount_as_printed")
+        if o_val and n_val:
+            comparisons[metric] = {
+                "older_period": str(older_period),
+                "older_amount": o_val,
+                "newer_period": str(newer_period),
+                "newer_amount": n_val,
+                "direction": "older_to_newer",
+            }
+
+    return {
+        "comparable": True,
+        "period_length_months": newer_period_months,
+        "older_period": str(older_period),
+        "newer_period": str(newer_period),
+        "order": "older_to_newer",
+        "metrics": comparisons,
+    }
 
 
 def verify_account_identity(text: str, orgnr: str, company_name: str | None) -> tuple[bool, str]:

@@ -43,8 +43,15 @@ def build_summary(orgnr: str, claims: list[dict[str, Any]], identity_anchor: dic
             sentences.append(f"The registry lists industry classification(s): {'; '.join(descriptions[:3])} [{','.join(inds.get('evidence_ids', []))}].")
 
     # 2. Operational description from website
+    web_match = next((x for x in by_field.get("website_identity_match", []) if x.get("value")), None)
+    if web_match and isinstance(web_match.get("value"), dict):
+        match_val = web_match["value"]
+        if "parent group" in str(match_val.get("reason", "")).lower() or "brand" in str(match_val.get("reason", "")).lower():
+            eids = web_match.get("evidence_ids", [])
+            cite = f" [{','.join(eids)}]" if eids else ""
+            sentences.append(f"The registry-listed website was identified as belonging to a parent group or brand, not the company's own site, so group social, news and jobs were not attributed to this subsidiary{cite}.")
     site = next((x for x in by_field.get("official_website", []) if x.get("availability") == "available" and x.get("value")), None)
-    if site:
+    if site and not (web_match and ("parent group" in str(web_match.get("value", {}).get("reason", "")).lower())):
         sentences.append(f"The registry lists the official website as {site['value']} [{','.join(site.get('evidence_ids', []))}].")
     desc = next((x for x in by_field.get("website_description", []) if x.get("availability") == "available" and x.get("value")), None)
     if desc:
@@ -81,10 +88,24 @@ def build_summary(orgnr: str, claims: list[dict[str, Any]], identity_anchor: dic
 
     # 4. Financials
     finances = [x for x in claims if x.get("field", "").startswith("financial.") and x.get("availability") == "available" and x.get("value")]
-    if finances:
+    latest_acc = next((x for x in by_field.get("latest_accounts", []) if x.get("availability") == "available" and x.get("value")), None)
+    comp_claim = next((x for x in by_field.get("financial_year_comparison", []) if x.get("availability") == "available" and x.get("value")), None)
+    if finances or latest_acc:
         periods = sorted(set(str(x.get("reporting_period")) for x in finances if x.get("reporting_period") and x.get("reporting_period") != "None"))
-        fin_eids = dict.fromkeys(e for x in finances for e in x.get('evidence_ids', []))
-        sentences.append(f"Financial figures were extracted conservatively from official annual-account documents for reporting period(s) {', '.join(periods)} [{','.join(fin_eids)}].")
+        fin_eids = dict.fromkeys(e for x in (finances + ([latest_acc] if latest_acc else [])) for e in x.get('evidence_ids', []))
+        newest_note = ""
+        if latest_acc and isinstance(latest_acc.get("value"), dict):
+            y = latest_acc["value"].get("year")
+            newest_note = f" The latest verified filing is {y} (FY2025 where it exists)."
+        sentences.append(f"Financial figures were extracted conservatively from official annual-account documents for reporting period(s) {', '.join(periods)} [{','.join(fin_eids)}].{newest_note}")
+        if comp_claim and isinstance(comp_claim.get("value"), dict):
+            comp = comp_claim["value"]
+            if comp.get("comparable") and comp.get("metrics"):
+                comp_eids = comp_claim.get("evidence_ids", [])
+                cite = f" [{','.join(comp_eids)}]" if comp_eids else ""
+                rev = comp["metrics"].get("revenue")
+                if rev:
+                    sentences.append(f"Comparing reporting periods of equal length ({comp.get('period_length_months', 12)} months) older to newer: revenue changed from {rev.get('older_amount')} (FY{rev.get('older_period')}) to {rev.get('newer_amount')} (FY{rev.get('newer_period')}){cite}.")
 
     # 5. Hiring, social media & announcements
     jobs = [x for x in claims if x.get("field", "").startswith("job_posting.") and x.get("availability") == "available"]
@@ -101,7 +122,7 @@ def build_summary(orgnr: str, claims: list[dict[str, Any]], identity_anchor: dic
     articles = [x for x in claims if x.get("field", "").startswith("website_article.") and x.get("availability") == "available"]
     if articles:
         art_eids = dict.fromkeys(e for x in articles for e in x.get('evidence_ids', []))
-        sentences.append(f"The official website exposed {len(articles)} dated article or announcement record(s) in the pages checked [{','.join(art_eids)}].")
+        sentences.append(f"The official website exposed {len(articles)} verified, dated article or announcement record(s) in the pages checked [{','.join(art_eids)}].")
 
     # 6. Changes
     if changes:

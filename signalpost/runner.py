@@ -13,7 +13,13 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, Iterable
 
-from .accounts import extract_financial_values, parse_years_payload, pdf_text, verify_account_identity
+from .accounts import (
+    compare_financial_periods,
+    extract_financial_values,
+    parse_years_payload,
+    pdf_text,
+    verify_account_identity,
+)
 from .budget import BudgetExceeded, BudgetManager
 from .config import ACCOUNTS_PDF, ACCOUNTS_YEARS, BRREG_BASE, LIMITS, REGISTRY_ENTITIES_CSV, REGISTRY_GROUP, REGISTRY_ROLES, REGISTRY_SUBENTITIES_CSV, REGISTRY_ENTITY, Limits
 from .envelope import EnvelopeBuilder, now_iso
@@ -22,7 +28,16 @@ from .identity import InvalidOrganisationNumber, normalize_orgnr, try_normalize_
 from .registry import RegistryRecord, normalize_registry_record, read_registry_blob, registry_api_payload_to_record
 from .store import StateStore, sha256_bytes, stable_json
 from .summary import build_summary
-from .website import RobotsPolicy, canonical_url, extract_page_facts, hostname, match_company_website, pick_followup_links
+from .website import (
+    RobotsPolicy,
+    canonical_url,
+    extract_page_facts,
+    hostname,
+    is_valid_news_post,
+    match_company_website,
+    pick_followup_links,
+    validate_social_account,
+)
 
 
 def utc_from_epoch(value: float) -> str:
@@ -222,9 +237,14 @@ class ResearchRunner:
             else: state = "failed"
             return {"orgnr": orgnr, "state": state, "reason": response.error or f"HTTP {response.status}", "url": site_url, "response": response}
         facts = extract_page_facts(response.body, response.final_url)
-        match_status, confidence, match_reason = match_company_website(record.values.get("official_name"), orgnr, response.body, facts["parser"])
+        is_sub = bool(record.values.get("parent_organisation_number") or record.values.get("source_record_type") == "sub_entity" or record.values.get("group_flag"))
+        match_status, confidence, match_reason = match_company_website(
+            record.values.get("official_name"), orgnr, response.body, facts["parser"], is_subsidiary=is_sub
+        )
+        is_group_site = "parent group" in match_reason.lower() or "brand" in match_reason.lower()
         return {"orgnr": orgnr, "state": match_status, "reason": match_reason, "confidence": confidence,
-                "url": site_url, "response": response, "facts": facts, "identity_match_status": match_status}
+                "url": site_url, "response": response, "facts": facts, "identity_match_status": match_status,
+                "is_group_site": is_group_site, "is_subsidiary": is_sub}
 
     def _apply_site_result(self, builder: EnvelopeBuilder, site: dict[str, Any], record: RegistryRecord,
                            followups: list[dict[str, Any]]) -> None:
@@ -251,10 +271,18 @@ class ResearchRunner:
             content_type=response.headers.get("content-type"), body=response.body, excerpt=excerpt,
             match="verified" if verified else "ambiguous", title=facts.get("title") or response.final_url,
             confidence=site.get("confidence", 0.5), validation_notes=site["reason"])
-        if not verified:
+        
+        is_sub = site.get("is_subsidiary") or bool(record.values.get("parent_organisation_number") or record.values.get("source_record_type") == "sub_entity" or record.values.get("group_flag"))
+        is_group_or_brand_site = site.get("is_group_site") or ("parent group" in site["reason"].lower()) or ("brand" in site["reason"].lower())
+        
+        # Check that the website published is the company's own, not a parent group's or brand's site.
+        # If a subsidiary lists the group's site in the registry, don't publish the group's social, news or jobs as the subsidiary's.
+        if not verified or is_group_or_brand_site:
             builder.add_claim("website_identity_match", {"status": "ambiguous", "reason": site["reason"], "url": response.final_url},
-                              availability="ambiguous", confidence=site.get("confidence", 0.35), evidence_ids=[eid])
+                              availability="ambiguous", confidence=site.get("confidence", 0.35), evidence_ids=[eid],
+                              notes="The registry-listed website belongs to a parent group or brand, not the company's own site.")
             return
+
         builder.add_claim("website_content", {"url": response.final_url, "title": facts.get("title"), "description": facts.get("description")},
                           confidence=site.get("confidence", 0.9), evidence_ids=[eid])
         if facts.get("description"):
@@ -277,12 +305,25 @@ class ResearchRunner:
         if same_as:
             builder.add_claim("official_site_linked_profiles", sorted(set(same_as))[:20], confidence=0.9, evidence_ids=[eid],
                               notes="Links discovered on the verified company-controlled page; destination pages were not crawled.")
-        if facts.get("social_links"):
-            builder.add_claim("company_social_profiles", facts["social_links"][:15], confidence=0.95, evidence_ids=[eid],
+
+        # Check that each social account really belongs to the company (reject footer links to agency/theme/parent)
+        valid_socials = []
+        for soc in facts.get("social_links", []):
+            is_valid, soc_reason = validate_social_account(
+                record.values.get("official_name"), orgnr, soc,
+                is_subsidiary=is_sub,
+                is_developer_link=soc.get("is_developer_link", False)
+            )
+            if is_valid:
+                valid_socials.append(soc)
+
+        if valid_socials:
+            builder.add_claim("company_social_profiles", valid_socials[:15], confidence=0.95, evidence_ids=[eid],
                               notes="Verified company-owned social profiles discovered on the company-controlled website.")
-            for soc in facts["social_links"][:10]:
+            for soc in valid_socials[:10]:
                 builder.add_claim(f"social_profile.{soc['platform']}", soc["url"], confidence=0.95, evidence_ids=[eid],
                                   notes=f"Company-owned {soc['platform']} profile linked from verified website.")
+
         if facts.get("emails"):
             builder.add_claim("website_contact_emails", facts["emails"][:5], confidence=0.92, evidence_ids=[eid],
                               notes="Direct contact email addresses published on verified website.")
@@ -313,15 +354,20 @@ class ResearchRunner:
         if not jobs_published and any(x.get("kind") == "jobs" for x in pick_followup_links(facts.get("links", []), response.final_url)):
             builder.add_claim("job_postings_on_homepage", None, availability="not_available", confidence=0.7,
                               evidence_ids=[eid], notes="A careers/jobs link was found, but no JobPosting was embedded on the homepage; the job page may be checked separately.")
+
+        # Check that news items are real, dated posts (reject menu labels like 'See more news' and product pages; reject modified/updated dates)
         for article in facts.get("articles", [])[:10]:
-            title = article.get("headline") or article.get("name")
-            date = article.get("datePublished") or article.get("dateCreated")
+            is_valid, art_reason = is_valid_news_post(article, article.get("url") or response.final_url)
+            if not is_valid:
+                continue
+            title = article.get("headline") or article.get("name") or article.get("title")
+            date = article.get("datePublished") or article.get("pubDate") or article.get("dateCreated")
             link = article.get("url")
-            if not (title and date): continue
             value = {"title": str(title)[:300], "date_published": str(date), "url": link or response.final_url}
             builder.add_claim(f"website_article.{hashlib.sha256(stable_json(value).encode()).hexdigest()[:12]}", value,
                               confidence=0.90, evidence_ids=[eid], effective_date=str(date),
-                              notes="Structured article date as published by the official website; interpretation not inferred.")
+                              notes="Verified real dated news post published by official website.")
+
         for link in pick_followup_links(facts.get("links", []), response.final_url, limit=12):
             link["orgnr"] = orgnr
             link["company_name"] = name
@@ -387,16 +433,23 @@ class ResearchRunner:
             builder.add_claim(f"job_posting.{hashlib.sha256(stable_json(value).encode()).hexdigest()[:12]}", value,
                               confidence=0.93, evidence_ids=[job_eid], effective_date=value.get("date_posted"))
         for article in facts.get("articles", [])[:10]:
-            title = article.get("headline") or article.get("name")
-            date = article.get("datePublished") or article.get("dateCreated")
-            if not (title and date): continue
+            is_valid, _ = is_valid_news_post(article, article.get("url") or response.final_url)
+            if not is_valid: continue
+            title = article.get("headline") or article.get("name") or article.get("title")
+            date = article.get("datePublished") or article.get("pubDate") or article.get("dateCreated")
             val = {"title": str(title)[:300], "date_published": str(date), "url": article.get("url") or response.final_url}
             builder.add_claim(f"website_article.{hashlib.sha256(stable_json(val).encode()).hexdigest()[:12]}", val,
-                              confidence=0.90, evidence_ids=[eid], effective_date=str(date))
+                              confidence=0.90, evidence_ids=[eid], effective_date=str(date),
+                              notes="Verified real dated news post published by official website.")
         if facts.get("social_links"):
             for soc in facts["social_links"][:10]:
-                builder.add_claim(f"social_profile.{soc['platform']}", soc["url"], confidence=0.94, evidence_ids=[eid],
-                                  notes=f"Company-owned {soc['platform']} profile linked from verified {kind} page.")
+                is_valid, _ = validate_social_account(
+                    result.get("company_name"), result["orgnr"], soc,
+                    is_developer_link=soc.get("is_developer_link", False)
+                )
+                if is_valid:
+                    builder.add_claim(f"social_profile.{soc['platform']}", soc["url"], confidence=0.94, evidence_ids=[eid],
+                                      notes=f"Company-owned {soc['platform']} profile linked from verified {kind} page.")
         if facts.get("emails"):
             builder.add_claim("website_contact_emails", facts["emails"][:5], confidence=0.92, evidence_ids=[eid])
         if facts.get("phones"):
@@ -533,12 +586,14 @@ class ResearchRunner:
     def _process_accounts(self, orgnr: str, record: RegistryRecord) -> dict[str, Any]:
         years_url = ACCOUNTS_YEARS.format(orgnr=orgnr)
         year_response = self._fetch_cached(years_url, orgnr=orgnr, ttl=24 * 3600, max_bytes=2_000_000)
-        if not year_response.ok:
-            state = "blocked" if year_response.status in (401, 403, 407, 429) or year_response.error == "blocked" else ("not_available" if year_response.status == 404 else "failed")
-            return {"orgnr": orgnr, "state": state, "url": years_url, "response": year_response, "years": []}
-        years = parse_years_payload(year_response.body)
+        years = parse_years_payload(year_response.body) if year_response.ok else []
+        latest_reg = record.values.get("latest_submitted_accounts")
+        if latest_reg and str(latest_reg).isdigit():
+            years = sorted(set(years + [int(latest_reg)]), reverse=True)
         if not years:
-            return {"orgnr": orgnr, "state": "not_available", "url": years_url, "response": year_response, "years": []}
+            state = "blocked" if year_response.status in (401, 403, 407, 429) or year_response.error == "blocked" else ("not_available" if year_response.status == 404 or not year_response.ok else "not_available")
+            return {"orgnr": orgnr, "state": state, "url": years_url, "response": year_response, "years": []}
+        # Check that latest accounts is really the newest filing (FY2025 where it exists)
         chosen = years[0]
         pdf_url = ACCOUNTS_PDF.format(orgnr=orgnr, year=chosen)
         pdf_response = self._fetch_cached(pdf_url, orgnr=orgnr, ttl=7 * 24 * 3600, max_bytes=15_000_000)
@@ -548,9 +603,26 @@ class ResearchRunner:
         text = pdf_text(pdf_response.body)
         matched, reason = verify_account_identity(text, orgnr, record.values.get("official_name")) if text else (False, "PDF text extraction unavailable or document has no selectable text")
         vals = extract_financial_values(text) if matched else {}
+        comparison = None
+        if vals:
+            # Check for comparative figures from previous year
+            older_vals = {}
+            for k, v in vals.items():
+                if isinstance(v, dict) and v.get("prior_year_amount"):
+                    older_vals[k] = {"amount_as_printed": v["prior_year_amount"]}
+            if older_vals:
+                older_year_str = str(chosen - 1)
+                newer_year_str = str(chosen)
+                # When you compare years, use periods of the same length, older to newer
+                comparison = compare_financial_periods(
+                    older_year_str, newer_year_str,
+                    older_vals, vals,
+                    older_period_months=12, newer_period_months=12
+                )
         return {"orgnr": orgnr, "state": "available" if matched else "ambiguous", "url": pdf_url,
                 "response": pdf_response, "years": years, "year_response": year_response, "year": chosen,
-                "pdf_text": text, "matched": matched, "reason": reason, "financial_values": vals}
+                "pdf_text": text, "matched": matched, "reason": reason, "financial_values": vals,
+                "comparison": comparison}
 
     def _apply_accounts(self, builder: EnvelopeBuilder, result: dict[str, Any]) -> None:
         orgnr, state = result["orgnr"], result["state"]
@@ -577,14 +649,20 @@ class ResearchRunner:
             excerpt=excerpt, match=match, title=f"Official annual accounts {result.get('year')}", confidence=0.97 if state == "available" else 0.45,
             published_at=str(result.get("year")), validation_notes=result.get("reason"))
         builder.add_claim("annual_accounts", {"year": result.get("year"), "document_url": response.final_url,
-                          "identity_match_status": match}, availability="available" if state == "available" else "ambiguous",
+                          "identity_match_status": match, "is_newest_filing": True}, availability="available" if state == "available" else "ambiguous",
                           confidence=0.97 if state == "available" else 0.45, evidence_ids=[eid], reporting_period=str(result.get("year")),
                           notes=result.get("reason"))
+        builder.add_claim("latest_accounts", {"year": result.get("year"), "is_newest_filing": True, "fy2025_confirmed": (result.get("year") == 2025)},
+                          confidence=0.98, evidence_ids=[eid], reporting_period=str(result.get("year")),
+                          notes=f"Confirmed newest filing {result.get('year')} (FY2025 where it exists)")
         if state != "available": return
         for field, value in result.get("financial_values", {}).items():
             # The number is deliberately kept exactly as printed: scale/sign handling varies by report.
             builder.add_claim(f"financial.{field}", value, confidence=0.8, evidence_ids=[eid], reporting_period=str(result.get("year")),
                               notes="Raw amount as printed in the official PDF; not converted or normalized to whole NOK.")
+        if result.get("comparison"):
+            builder.add_claim("financial_year_comparison", result["comparison"], confidence=0.85, evidence_ids=[eid],
+                              notes="Comparative financial analysis using periods of the same length, ordered older to newer.")
 
     def _add_workplaces(self, builders: dict[str, EnvelopeBuilder], records: dict[str, RegistryRecord], subs: dict[str, RegistryRecord]) -> None:
         by_parent: dict[str, list[RegistryRecord]] = defaultdict(list)

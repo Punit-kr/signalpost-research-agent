@@ -360,5 +360,192 @@ class SocialAndReportTests(unittest.TestCase):
         self.assertIn("Test AS", md_doc)
 
 
+class SignalpostValidationPolicyTests(unittest.TestCase):
+    def test_subsidiary_listing_group_website_suppresses_group_social_news_and_jobs(self):
+        from signalpost.envelope import EnvelopeBuilder
+        from signalpost.registry import normalize_registry_record
+        from signalpost.website import PageParser, extract_page_facts
+        from signalpost.runner import ResearchRunner
+        from signalpost.store import StateStore
+        from signalpost.budget import BudgetManager
+
+        # Subsidiary record with group flag and parent organisation number
+        rec = normalize_registry_record({
+            "organisasjonsnummer": "915637353",
+            "navn": "SKS PRODUKSJON AS",
+            "erIKonsern": True,
+            "overordnetEnhet": "987654321",
+            "hjemmeside": "https://sks.no",
+        })
+
+        # The parent group site HTML
+        html_content = b"""<!DOCTYPE html>
+        <html>
+        <head>
+          <title>Konsern - SKS - Forside</title>
+          <meta name="description" content="SKS is an energy group with multiple operating subsidiaries.">
+        </head>
+        <body>
+          <h1>SKS Group Portal</h1>
+          <a href="https://linkedin.com/company/sks-group">SKS Group LinkedIn</a>
+          <script type="application/ld+json">
+          {
+            "@context": "https://schema.org",
+            "@type": "JobPosting",
+            "title": "Group Operations Director",
+            "datePosted": "2026-03-01",
+            "hiringOrganization": {"name": "SKS Konsern"}
+          }
+          </script>
+          <script type="application/ld+json">
+          {
+            "@context": "https://schema.org",
+            "@type": "NewsArticle",
+            "headline": "SKS Group Annual Strategy",
+            "datePublished": "2026-03-10"
+          }
+          </script>
+        </body>
+        </html>"""
+
+        with tempfile.TemporaryDirectory() as d:
+            store = StateStore(Path(d) / "db.sqlite3", Path(d) / "snaps")
+            try:
+                runner = ResearchRunner(store=store, budget=BudgetManager(max_requests=10, max_runtime_seconds=30, max_cost_usd=0.1),
+                                        run_id="test-sub", skip_web=True)
+                builder = EnvelopeBuilder("915637353", "test-sub", "2026-01-01T00:00:00Z")
+                parser = PageParser("https://sks.no/")
+                parser.feed(html_content.decode("utf-8"))
+                facts = extract_page_facts(html_content, "https://sks.no/")
+
+                site_res = {
+                    "orgnr": "915637353",
+                    "state": "ambiguous",
+                    "reason": "registered website belongs to parent group or holding company, not the subsidiary's own site",
+                    "confidence": 0.35,
+                    "url": "https://sks.no/",
+                    "response": FetchResult("https://sks.no/", "https://sks.no/", status=200, headers={"content-type": "text/html"}, body=html_content, retrieved_at="2026-01-01T00:00:00Z"),
+                    "facts": facts,
+                    "is_group_site": True,
+                    "is_subsidiary": True,
+                }
+
+                runner._apply_site_result(builder, site_res, rec, [])
+
+                # Verify website_content was NOT published as verified company-owned site
+                avail_claims = {c["field"]: c for c in builder.claims if c.get("availability") == "available"}
+                self.assertNotIn("website_content", avail_claims)
+                self.assertNotIn("company_social_profiles", avail_claims)
+                self.assertFalse(any(k.startswith("social_profile.") for k in avail_claims))
+                self.assertFalse(any(k.startswith("job_posting.") for k in avail_claims))
+                self.assertFalse(any(k.startswith("website_article.") for k in avail_claims))
+
+                # Identity match records ambiguity with parent group note
+                match_claim = next(c for c in builder.claims if c["field"] == "website_identity_match")
+                self.assertEqual(match_claim["availability"], "ambiguous")
+                self.assertIn("parent group", match_claim["notes"].lower())
+            finally:
+                store.close()
+
+    def test_social_account_belonging_to_company(self):
+        from signalpost.website import validate_social_account
+
+        # 1. Web agencies in footer must be rejected
+        ok, reason = validate_social_account("Fjord Seafood AS", "123456789", {"platform": "facebook", "url": "https://facebook.com/dekode"})
+        self.assertFalse(ok)
+        self.assertIn("web agency", reason.lower())
+
+        ok, reason = validate_social_account("Fjord Seafood AS", "123456789", {"platform": "instagram", "url": "https://instagram.com/netlife_design"})
+        self.assertFalse(ok)
+        self.assertIn("web agency", reason.lower())
+
+        # 2. Website theme and CMS must be rejected
+        ok, reason = validate_social_account("Fjord Seafood AS", "123456789", {"platform": "x", "url": "https://x.com/wordpress"})
+        self.assertFalse(ok)
+        self.assertIn("cms", reason.lower())
+
+        ok, reason = validate_social_account("Fjord Seafood AS", "123456789", {"platform": "github", "url": "https://github.com/elementor"})
+        self.assertFalse(ok)
+        self.assertIn("theme", reason.lower())
+
+        # 3. Developer / footer link flag must be rejected
+        ok, reason = validate_social_account("Fjord Seafood AS", "123456789", {"platform": "linkedin", "url": "https://linkedin.com/company/fjord-seafood"}, is_developer_link=True)
+        self.assertFalse(ok)
+        self.assertIn("designer, developer, or cms", reason.lower())
+
+        # 4. Parent group social account must be rejected for subsidiary
+        ok, reason = validate_social_account("Aon Norway AS", "123456789", {"platform": "linkedin", "url": "https://linkedin.com/company/aon"}, is_subsidiary=True, parent_name="Aon Group")
+        self.assertFalse(ok)
+        self.assertIn("parent group", reason.lower())
+
+        # 5. Verified company social accounts must be accepted
+        ok, reason = validate_social_account("Norsk Fiskeeksport AS", "123456789", {"platform": "linkedin", "url": "https://linkedin.com/company/norsk-fiskeeksport"})
+        self.assertTrue(ok)
+
+        ok, reason = validate_social_account("Aon Norway AS", "123456789", {"platform": "linkedin", "url": "https://linkedin.com/company/aon-norway"}, is_subsidiary=True, parent_name="Aon Group")
+        self.assertTrue(ok)
+
+    def test_news_items_must_be_real_dated_posts_not_menu_or_product_pages(self):
+        from signalpost.website import is_valid_news_post
+
+        # 1. Menu labels must be rejected
+        self.assertFalse(is_valid_news_post({"title": "See more news", "datePublished": "2026-03-01"})[0])
+        self.assertFalse(is_valid_news_post({"title": "Se flere nyheter", "datePublished": "2026-03-01"})[0])
+        self.assertFalse(is_valid_news_post({"title": "Flere nyheter", "datePublished": "2026-03-01"})[0])
+        self.assertFalse(is_valid_news_post({"title": "Alle nyheter", "datePublished": "2026-03-01"})[0])
+        self.assertFalse(is_valid_news_post({"title": "Read more", "datePublished": "2026-03-01"})[0])
+        self.assertFalse(is_valid_news_post({"title": "Nyheter", "datePublished": "2026-03-01"})[0])
+
+        # 2. Product and service pages must be rejected
+        self.assertFalse(is_valid_news_post({"title": "Offshore Sensor Pack", "datePublished": "2026-03-01", "url": "https://example.no/products/sensor-pack"})[0])
+        self.assertFalse(is_valid_news_post({"title": "Subsea Maintenance Service", "datePublished": "2026-03-01", "@type": "Product"})[0])
+
+        # 3. Modified or feed updated dates must be rejected as publish dates
+        ok, reason = is_valid_news_post({"title": "Quarterly production results", "dateModified": "2026-04-01"})
+        self.assertFalse(ok)
+        self.assertIn("modified", reason.lower())
+
+        ok, reason = is_valid_news_post({"title": "New solar energy contract", "updated": "2026-04-01"})
+        self.assertFalse(ok)
+        self.assertIn("modified", reason.lower())
+
+        ok, reason = is_valid_news_post({"title": "Green energy transition report", "feed_updated": "2026-04-01"})
+        self.assertFalse(ok)
+        self.assertIn("modified", reason.lower())
+
+        # 4. Real dated news post must be accepted
+        ok, reason = is_valid_news_post({"title": "New offshore contract signed with Equinor", "datePublished": "2026-04-15", "url": "https://example.no/news/contract-equinor"})
+        self.assertTrue(ok)
+
+    def test_latest_accounts_is_newest_filing_fy2025_and_periods_same_length_older_to_newer(self):
+        from signalpost.accounts import compare_financial_periods, extract_financial_values
+
+        # 1. Column parser correctly assigns newest year to current amount and prior to prior_year_amount
+        raw_text = "Sum driftsinntekter 1 500 000 1 200 000\nDriftsresultat 300 000 200 000\nÅrsresultat 250 000 150 000"
+        vals = extract_financial_values(raw_text)
+        self.assertEqual(vals["revenue"]["amount_as_printed"], "1 500 000")
+        self.assertEqual(vals["revenue"]["prior_year_amount"], "1 200 000")
+
+        # 2. Period comparison must reject periods of different lengths
+        comp = compare_financial_periods("2024", "2025", {"revenue": {"amount_as_printed": "1 200 000"}},
+                                         vals, older_period_months=6, newer_period_months=12)
+        self.assertFalse(comp["comparable"])
+        self.assertIn("different lengths", comp["reason"].lower())
+
+        # 3. Period comparison for equal length must be ordered older to newer
+        comp_equal = compare_financial_periods("2024", "2025",
+                                               {"revenue": {"amount_as_printed": "1 200 000"}},
+                                               {"revenue": {"amount_as_printed": "1 500 000"}},
+                                               older_period_months=12, newer_period_months=12)
+        self.assertTrue(comp_equal["comparable"])
+        self.assertEqual(comp_equal["order"], "older_to_newer")
+        metric = comp_equal["metrics"]["revenue"]
+        self.assertEqual(metric["older_period"], "2024")
+        self.assertEqual(metric["older_amount"], "1 200 000")
+        self.assertEqual(metric["newer_period"], "2025")
+        self.assertEqual(metric["newer_amount"], "1 500 000")
+        self.assertEqual(metric["direction"], "older_to_newer")
+
+
 if __name__ == "__main__":
     unittest.main()

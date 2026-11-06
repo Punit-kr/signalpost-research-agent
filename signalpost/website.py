@@ -116,6 +116,206 @@ def normalize_social_url(url: str) -> dict[str, str] | None:
     return {"platform": platform, "url": f"https://{canonical_host}/{'/'.join(parts)}"}
 
 
+DISALLOWED_SOCIAL_HANDLES = {
+    # CMS, theme vendors, site builders
+    "wordpress", "automattic", "wpengine", "elementor", "envato", "themeforest",
+    "shopify", "squarespace", "wix", "webflow", "drupal", "joomla",
+    "ghost", "bootstrap", "twbs", "woocommerce", "prestashop", "magento",
+    "hubspot", "mailchimp", "klarna", "vipps", "stripe", "cloudflare", "google",
+    # Agencies & web developers (Norwegian & international)
+    "dekode", "netlife", "netlifedesign", "creuna", "knowit", "bouvet",
+    "soprasteria", "tietoevry", "makingwaves", "boldscandinavia", "apriil",
+    "try", "schjærven", "anti", "bleed", "mona", "goodmorning", "novanet",
+    "webstep", "miles", "bekk", "dentsu", "publicis", "vaimo", "geta",
+    "redink", "coretrek", "mediadigital", "gasta", "findexa", "eniro",
+    "gulesider", "visma", "proisp", "domeneshop", "misshosting", "syse",
+    "hostinger", "siteground",
+    # Template & generic handles
+    "username", "yourprofile", "yourpage", "company-name", "handle",
+    "pagename", "profile", "example", "template", "theme", "admin", "channel",
+    # Platform self-handles
+    "facebook", "instagram", "linkedin", "twitter", "x", "youtube", "tiktok", "github",
+}
+
+MENU_AND_NAV_TITLES = {
+    "see more news", "see more", "more news", "se flere nyheter", "se flere",
+    "flere nyheter", "alle nyheter", "mer om oss", "les mer", "read more",
+    "news", "nyheter", "aktuelt", "presse", "press", "pressemeldinger",
+    "press releases", "arkiv", "archive", "siste nytt", "latest news",
+    "view all", "view all news", "tilbake", "back to news", "back", "home",
+    "forside", "meny", "menu", "search", "søk", "contact us", "kontakt oss",
+    "contact", "kontakt", "about us", "om oss", "about", "om", "next",
+    "neste", "previous", "forrige", "artikler", "articles", "blog", "blogg",
+    "oversikt", "overview", "hva skjer", "whats new", "what's new",
+}
+
+PRODUCT_PATH_REGEX = re.compile(
+    r"/(?:products?|produkter?|services?|tjenester?|solutions?|losninger?|shop|butikk|vare|varer|catalog|item|items)(?:/|$)",
+    re.I
+)
+
+PARKED_MARKERS = (
+    "domain is for sale", "domain for sale", "hugedomains", "parked at",
+    "miss hosting", "her flytter snart en ny gjest", "has been informing visitors",
+    "find the best information and most relevant links on all topics related to",
+    "buy this domain", "denne nettsiden er parkert", "under construction",
+)
+
+GROUP_KEYWORDS = {
+    "konsern", "group", "holdings", "holding", "portfolio", "konsernselskap",
+    "datterselskap", "subsidiaries", "umbrella", "investeringsselskap"
+}
+
+
+def _tokens(value: Any) -> list[str]:
+    import unicodedata
+    legal_and_generic = {
+        "as", "asa", "ans", "da", "enk", "iks", "sa", "sam", "sti", "stiftelsen",
+        "nuf", "ab", "b", "v", "limited", "ltd", "inc", "plc", "the", "og", "and",
+    }
+    text = str(value or "").translate(str.maketrans({"ø": "o", "Ø": "O", "å": "a", "Å": "A", "æ": "ae", "Æ": "AE"}))
+    text = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode().casefold()
+    return [token for token in re.findall(r"[a-z0-9]+", text) if token not in legal_and_generic and len(token) > 1]
+
+
+def validate_social_account(
+    company_name: str | None,
+    orgnr: str,
+    social_item: dict[str, str],
+    *,
+    is_subsidiary: bool = False,
+    parent_name: str | None = None,
+    is_developer_link: bool = False,
+) -> tuple[bool, str]:
+    """Check that each social account really belongs to the company.
+
+    Rejects links pointing to:
+    - Web agency that built the site
+    - Website theme / CMS pages
+    - Parent group when publishing for a subsidiary
+    - Generic placeholders or unrelated companies
+    """
+    if is_developer_link:
+        return False, "Link is associated with website designer, developer, or CMS credits in footer"
+
+    url = (social_item.get("url") or "").strip()
+    platform = social_item.get("platform") or ""
+    if not url:
+        return False, "Missing social URL"
+
+    try:
+        parsed = urllib.parse.urlsplit(url)
+    except Exception:
+        return False, "Malformed social URL"
+
+    path_parts = [p for p in parsed.path.strip("/").split("/") if p]
+    if not path_parts:
+        return False, "Social URL lacks account path"
+
+    # Extract account handle
+    handle = path_parts[1] if (platform == "linkedin" and len(path_parts) >= 2) else path_parts[0]
+    handle = handle.lstrip("@").strip()
+    handle_clean = re.sub(r"[^a-z0-9]", "", handle.lower())
+
+    if not handle_clean:
+        return False, "Empty or invalid social handle"
+
+    # 1. Block web agencies, theme developers, CMS platforms and template placeholders
+    for blocked in DISALLOWED_SOCIAL_HANDLES:
+        blocked_clean = re.sub(r"[^a-z0-9]", "", blocked.lower())
+        if handle_clean == blocked_clean or blocked_clean in handle_clean:
+            return False, f"Social account '{handle}' belongs to web agency, CMS, theme vendor, or placeholder"
+
+    # 2. Block parent group social accounts when publishing for a subsidiary
+    company_tokens = set(_tokens(company_name))
+    if is_subsidiary:
+        parent_tokens = set(_tokens(parent_name)) if parent_name else set()
+        subsidiary_distinctive = company_tokens - parent_tokens - {"as", "asa", "holding", "konsern"}
+        handle_tokens = set(_tokens(handle))
+
+        # If handle matches the parent group name or only parent tokens without subsidiary qualifier
+        if parent_tokens and handle_tokens.issubset(parent_tokens) and not (handle_tokens & subsidiary_distinctive):
+            return False, f"Social account '{handle}' belongs to parent group '{parent_name}', not the subsidiary"
+        # If subsidiary has an operational or geographic distinction but handle is just the parent brand
+        if len(company_tokens) >= 2 and any(t in company_tokens for t in ("norway", "norge", "produksjon", "drift", "retail", "eiendom")):
+            qualifiers = company_tokens & {"norway", "norge", "produksjon", "drift", "retail", "eiendom"}
+            if not (handle_tokens & qualifiers):
+                return False, f"Social account '{handle}' represents the parent group, lacking subsidiary qualifier {qualifiers}"
+
+    # 3. Match against company name
+    if not company_tokens:
+        return False, "Cannot verify social account without registered company name"
+
+    handle_tokens = set(_tokens(handle))
+    overlap = company_tokens & handle_tokens
+    compact_name = "".join(_tokens(company_name))
+
+    if not overlap and compact_name not in handle_clean and handle_clean not in compact_name:
+        return False, f"Social handle '{handle}' has no matching name tokens with company '{company_name}'"
+
+    return True, "Social account verified as belonging to company"
+
+
+def is_valid_news_post(article: dict[str, Any], page_url: str = "") -> tuple[bool, str]:
+    """Check that news items are real, dated posts.
+
+    Rejects:
+    - Menu labels like "See more news" or generic navigation headers
+    - Product or service pages
+    - Items where date is merely "modified" or feed "updated" rather than a real publish date
+    """
+    title = str(article.get("headline") or article.get("name") or article.get("title") or "").strip()
+    if not title:
+        return False, "News item has no headline/title"
+
+    norm_title = re.sub(r"\s+", " ", title.strip().lower())
+
+    # 1. Reject menu labels and navigation text
+    if norm_title in MENU_AND_NAV_TITLES:
+        return False, f"Headline '{title}' is a menu label or navigation header, not a news post"
+
+    if re.match(r"^(?:see\s+more|se\s+flere|alle\s+nyheter|flere\s+nyheter|read\s+more|les\s+mer|view\s+all)\b", norm_title):
+        return False, f"Headline '{title}' is a navigation or menu label"
+
+    words = norm_title.split()
+    if len(words) < 3 and len(norm_title) <= 15:
+        return False, f"Headline '{title}' is too short/generic to be an article"
+
+    # 2. Reject product and service pages
+    item_url = str(article.get("url") or page_url or "")
+    if item_url and PRODUCT_PATH_REGEX.search(item_url):
+        return False, f"URL path indicates a product/service page, not a news post: {item_url}"
+
+    typ = str(article.get("@type", "")).lower()
+    if any(t in typ for t in ("product", "service", "offer", "itemlist", "store")):
+        return False, f"Schema type '{typ}' is a product/service, not an article"
+
+    # 3. Reject modified or feed updated dates: must have genuine publish date
+    has_explicit_publish = bool(article.get("datePublished") or article.get("pubDate") or article.get("dateCreated"))
+    only_modified = not has_explicit_publish and bool(article.get("dateModified") or article.get("modified") or article.get("updated") or article.get("feed_updated") or article.get("lastModified") or article.get("sistEndret"))
+
+    if only_modified:
+        return False, "A 'modified' or feed 'updated' date is not a publish date"
+
+    pub_date = str(article.get("datePublished") or article.get("pubDate") or article.get("dateCreated") or "")
+    if not pub_date:
+        return False, "News item lacks a genuine publication date"
+
+    # Validate date structure
+    m = re.search(r"\b(20\d{2})[-/](\d{1,2})[-/](\d{1,2})\b", pub_date)
+    if not m:
+        if not re.match(r"^20\d{2}", pub_date):
+            return False, f"Publication date '{pub_date}' is not a valid dated timestamp"
+        year = int(pub_date[:4])
+    else:
+        year = int(m.group(1))
+
+    if year < 2000 or year > 2026:
+        return False, f"Publication date year {year} is out of realistic range"
+
+    return True, "Valid dated news post"
+
+
 class PageParser(HTMLParser):
     def __init__(self, base_url: str):
         super().__init__(convert_charrefs=True)
@@ -128,27 +328,31 @@ class PageParser(HTMLParser):
         self.jsonld_texts: list[str] = []
         self.emails: set[str] = set()
         self.phones: set[str] = set()
-        self.social_candidates: list[dict[str, str]] = []
+        self.social_candidates: list[dict[str, Any]] = []
         self._title_depth = 0
         self._heading_depth = 0
         self._script_type = ""
         self._script_buf: list[str] = []
-        self._anchor: dict[str, str] | None = None
+        self._anchor: dict[str, Any] | None = None
         self._anchor_depth = 0
         self._heading_buf: list[str] = []
         self._title_buf: list[str] = []
+        self._in_footer = 0
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         a = {k.lower(): (v or "") for k, v in attrs}
-        if tag.lower() == "meta":
+        tag_low = tag.lower()
+        if tag_low == "footer" or any("footer" in (a.get(k) or "").lower() for k in ("class", "id", "role")):
+            self._in_footer += 1
+        elif tag_low == "meta":
             key = (a.get("name") or a.get("property") or a.get("itemprop") or "").lower()
             val = a.get("content", "").strip()
             if key and val: self.meta[key] = val[:1000]
-        elif tag.lower() == "title":
+        elif tag_low == "title":
             self._title_depth = 1; self._title_buf = []
-        elif tag.lower() in {"h1", "h2", "h3"}:
+        elif tag_low in {"h1", "h2", "h3"}:
             self._heading_depth = 1; self._heading_buf = []
-        elif tag.lower() == "a" and a.get("href"):
+        elif tag_low == "a" and a.get("href"):
             raw_href = a["href"].strip()
             if raw_href.lower().startswith("mailto:"):
                 email = raw_href[7:].split("?")[0].strip()
@@ -159,21 +363,26 @@ class PageParser(HTMLParser):
                 if len(phone) >= 5 and len(phone) < 30:
                     self.phones.add(phone)
             soc = normalize_social_url(raw_href)
-            if soc and soc not in self.social_candidates:
-                self.social_candidates.append(soc)
+            if soc:
+                is_dev = any(dev in (a.get("rel") or "").lower() or dev in (a.get("class") or "").lower() for dev in ("designer", "developer", "author", "creator", "credits"))
+                soc_entry = {**soc, "in_footer": bool(self._in_footer > 0), "is_developer_link": bool(is_dev or self._in_footer > 0)}
+                if not any(s.get("url") == soc["url"] for s in self.social_candidates):
+                    self.social_candidates.append(soc_entry)
             target = canonical_url(raw_href, self.base_url)
             if target:
-                self._anchor = {"url": target, "text": "", "rel": a.get("rel", ""), "type": a.get("type", "")}
+                self._anchor = {"url": target, "text": "", "rel": a.get("rel", ""), "type": a.get("type", ""), "in_footer": bool(self._in_footer > 0)}
                 self._anchor_depth = 1
-        elif tag.lower() == "time":
+        elif tag_low == "time":
             val = a.get("datetime") or a.get("content")
             if val: self.times.append({"datetime": val, "text": ""})
-        elif tag.lower() == "script" and a.get("type", "").lower().split(";")[0] == "application/ld+json":
+        elif tag_low == "script" and a.get("type", "").lower().split(";")[0] == "application/ld+json":
             self._script_type = "jsonld"; self._script_buf = []
 
     def handle_endtag(self, tag: str) -> None:
         t = tag.lower()
-        if t == "title" and self._title_depth:
+        if t == "footer":
+            self._in_footer = max(0, self._in_footer - 1)
+        elif t == "title" and self._title_depth:
             self.title = " ".join("".join(self._title_buf).split())[:500]; self._title_depth = 0
         elif t in {"h1", "h2", "h3"} and self._heading_depth:
             val = " ".join("".join(self._heading_buf).split())
@@ -216,13 +425,24 @@ def _norm_name(value: str | None) -> str:
     return re.sub(r"[^a-z0-9æøå]+", " ", value).strip()
 
 
-def match_company_website(company_name: str | None, orgnr: str, raw: bytes, parser: PageParser) -> tuple[str, float, str]:
-    """Return verified/ambiguous/rejected; a registry URL alone does not license unrelated page facts."""
+def match_company_website(
+    company_name: str | None,
+    orgnr: str,
+    raw: bytes,
+    parser: PageParser,
+    *,
+    is_subsidiary: bool = False,
+    parent_name: str | None = None,
+) -> tuple[str, float, str]:
+    """Check that the website published is the company's own, not a parent group's or a brand's site."""
     text = raw.decode("utf-8", errors="ignore")[:500_000]
-    compact = re.sub(r"\D", "", text)
-    if orgnr in compact:
-        return "verified", 0.995, "exact organisation number found on official site"
-    name = _norm_name(company_name)
+    low_text = text.lower()
+
+    # 1. Parked or placeholder domain detection
+    for marker in PARKED_MARKERS:
+        if marker in low_text:
+            return "ambiguous", 0.1, f"captured page is a parked, for-sale, or placeholder domain: '{marker}'"
+
     site_names = []
     for ld in extract_jsonld(parser):
         if not isinstance(ld, dict): continue
@@ -232,6 +452,39 @@ def match_company_website(company_name: str | None, orgnr: str, raw: bytes, pars
             candidate = ld.get("name")
             if candidate: site_names.append(str(candidate))
     site_names.extend([parser.meta.get("og:site_name", ""), parser.title, *(parser.headings[:4])])
+    site_identity_text = " ".join(str(s) for s in site_names if s).lower()
+
+    # 2. Parent group / umbrella / holding company detection
+    has_group_marker = any(re.search(rf"\b{re.escape(k)}\b", site_identity_text) for k in GROUP_KEYWORDS)
+    comp_tokens = set(_tokens(company_name))
+    is_sports_club = bool(re.search(r"(?:^|\s)B\.?\s*I\.?\s*L\.?(?:\s|$)", str(company_name or ""), re.I))
+
+    # Business sports club pointing to parent company operating site
+    if is_sports_club and "bedriftsidrett" not in low_text and "b i l" not in low_text:
+        return "ambiguous", 0.3, "business sports-club entity points to the operating company's site without club evidence"
+
+    # If the page identity represents a parent group/konsern and the entity is a subsidiary
+    if has_group_marker and is_subsidiary:
+        return "ambiguous", 0.35, "registered website belongs to parent group or holding company, not the subsidiary's own site"
+
+    # 3. Brand site without company's legal name match
+    # When distinctive tokens of the legal name do not appear in homepage identity
+    if comp_tokens and len(comp_tokens) >= 2:
+        homepage_tokens = set(_tokens(site_identity_text))
+        overlap = comp_tokens & homepage_tokens
+        if not overlap:
+            return "ambiguous", 0.35, "registered website belongs to a brand or parent company without matching legal name"
+
+    # 4. Organisation number verification
+    compact = re.sub(r"\D", "", text)
+    if orgnr in compact:
+        # If the page represents a group/umbrella, an organisation number in contact list is not company's own site
+        if has_group_marker and is_subsidiary:
+            return "ambiguous", 0.4, "organisation number listed on parent group site; website belongs to parent group, not the subsidiary"
+        return "verified", 0.995, "exact organisation number found on official site"
+
+    # 5. Exact company name token match
+    name = _norm_name(company_name)
     for candidate in site_names:
         cand = _norm_name(candidate)
         if name and cand and name == cand:
@@ -239,7 +492,7 @@ def match_company_website(company_name: str | None, orgnr: str, raw: bytes, pars
         nt, ct = set(name.split()), set(cand.split())
         if len(nt) >= 2 and nt == ct:
             return "verified", 0.92, f"exact company-name token match: {candidate[:120]}"
-    # Do not publish external facts if identity has not been demonstrated on the page.
+
     return "ambiguous", 0.35, "registered website did not expose a strong name or organisation-number match"
 
 
