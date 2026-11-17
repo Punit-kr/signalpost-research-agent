@@ -1047,6 +1047,7 @@
         <div class="filter-chips">
           <button class="chip active" data-filter="all" onclick="app.setFilter('all', this)">All Companies (105)</button>
           <button class="chip" data-filter="flagship" onclick="app.setFilter('flagship', this)">⭐ Flagship Showcases (5)</button>
+          <button class="chip" data-filter="news_jobs" onclick="app.setFilter('news_jobs', this)">📰 News & Jobs Verified</button>
           <button class="chip" data-filter="fy2025" onclick="app.setFilter('fy2025', this)">📊 FY2025 Filings Verified</button>
           <button class="chip" data-filter="asa" onclick="app.setFilter('asa', this)">🏛️ ASA (Public Companies)</button>
           <button class="chip" data-filter="as" onclick="app.setFilter('as', this)">🏢 AS (Private Companies)</button>
@@ -1358,6 +1359,9 @@
             // Filter matching
             if (f === 'flagship') {
               return ['923609016', '991397368', '943753781', '981276957', '980755878'].includes(c.organisation_number);
+            }
+            if (f === 'news_jobs') {
+              return claims.some(cl => cl.field === 'company_news' || cl.field === 'job_posting' || cl.field.startsWith('website_article') || cl.field.startsWith('job_posting'));
             }
             if (f === 'fy2025') {
               return claims.some(cl => cl.field === 'latest_accounts' && (cl.value?.year === 2025 || cl.value?.fy2025_confirmed));
@@ -1697,26 +1701,74 @@
           const p = document.getElementById('panel-web-signals');
           if (!p) return;
 
-          const web = claims.find(c => c.field === 'website.url')?.value;
-          const social = claims.find(c => c.field === 'website.social_accounts')?.value || [];
-          const news = claims.find(c => c.field === 'website.news_items')?.value || [];
+          const webClaim = claims.find(c => c.field === 'website_content')?.value || claims.find(c => c.field === 'official_website')?.value;
+          const webUrl = typeof webClaim === 'object' && webClaim ? webClaim.url : webClaim;
+          const webDesc = typeof webClaim === 'object' && webClaim ? webClaim.description : claims.find(c => c.field === 'website_description')?.value;
+
+          // Social channels
+          let socialList = [];
+          const socGroup = claims.find(c => c.field === 'company_social_profiles')?.value;
+          if (Array.isArray(socGroup) && socGroup.length > 0) {
+            socialList = socGroup;
+          } else {
+            claims.filter(c => c.field.startsWith('social_profile.')).forEach(c => {
+              const platform = c.field.split('.')[1];
+              socialList.push({ platform, url: c.value });
+            });
+          }
+
+          // News claims
+          let newsList = [];
+          claims.filter(c => c.field === 'company_news' || c.field.startsWith('website_article')).forEach(c => {
+            if (c.value && !newsList.some(n => n.title === c.value.title || n.url === c.value.url)) {
+              newsList.push(c.value);
+            }
+          });
+
+          // Jobs claims
+          let jobList = [];
+          claims.filter(c => c.field === 'job_posting' || c.field.startsWith('job_posting.')).forEach(c => {
+            if (c.value && !jobList.some(j => j.title === c.value.title || j.url === c.value.url)) {
+              jobList.push(c.value);
+            }
+          });
+
           const isSubsidiary = summary?.includes('subsidiary') || summary?.includes('Parent Group');
 
-          let socialBadges = '<span style="color:var(--text-muted);">No external social channels linked</span>';
-          if (Array.isArray(social) && social.length > 0) {
-            socialBadges = social.map(s => `
+          let socialBadges = '<span style="color:var(--text-muted); font-size: 0.85rem;">No external social channels linked</span>';
+          if (socialList.length > 0) {
+            socialBadges = socialList.map(s => `
               <a href="${s.url}" target="_blank" rel="noopener noreferrer" class="btn btn-secondary" style="font-size:0.8rem; padding: 0.25rem 0.6rem;">
-                🔗 ${s.platform}: @${s.handle}
+                🔗 ${s.platform.toUpperCase()}: ${s.url.split('/').pop() || s.platform}
               </a>
             `).join(' ');
           }
 
-          let newsList = '<div style="color:var(--text-muted); font-size:0.85rem;">No dated news posts detected in sampled pages</div>';
-          if (Array.isArray(news) && news.length > 0) {
-            newsList = news.map(n => `
-              <div style="background:var(--bg-card); border:1px solid var(--border); padding:0.6rem; border-radius:var(--radius-sm); margin-bottom:0.4rem; font-size:0.85rem;">
-                <div style="font-weight:600;"><a href="${n.url}" target="_blank" rel="noopener noreferrer" style="color:var(--text); text-decoration:none;">${n.title}</a></div>
-                <div style="font-size:0.75rem; color:var(--text-muted); margin-top:0.15rem;">Published: <strong>${n.published_date}</strong> (Verified dated post)</div>
+          let newsHtml = '<div style="color:var(--text-muted); font-size:0.85rem;">No dated news posts detected in sampled pages</div>';
+          if (newsList.length > 0) {
+            newsHtml = newsList.map(n => `
+              <div style="background:var(--bg-card); border:1px solid var(--border); padding:0.75rem; border-radius:var(--radius-md); margin-bottom:0.5rem; font-size:0.85rem;">
+                <div style="font-weight:700;"><a href="${n.url}" target="_blank" rel="noopener noreferrer" style="color:var(--primary); text-decoration:none;">${n.title} ↗</a></div>
+                <div style="font-size:0.75rem; color:var(--text-muted); margin-top:0.25rem; display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: center;">
+                  <span>Published: <strong>${n.date_published || 'Recent'}</strong></span>
+                  <span class="badge badge-verified">Verified Dated Post</span>
+                  ${n.matched_entity_proof ? `<span style="color: var(--success); font-weight: 500;">✓ ${n.matched_entity_proof}</span>` : ''}
+                </div>
+              </div>
+            `).join('');
+          }
+
+          let jobsHtml = '<div style="color:var(--text-muted); font-size:0.85rem;">No active job postings detected on homepage or career subpages</div>';
+          if (jobList.length > 0) {
+            jobsHtml = jobList.map(j => `
+              <div style="background:var(--bg-card); border:1px solid var(--border); padding:0.75rem; border-radius:var(--radius-md); margin-bottom:0.5rem; font-size:0.85rem;">
+                <div style="font-weight:700;"><a href="${j.url}" target="_blank" rel="noopener noreferrer" style="color:var(--accent); text-decoration:none;">${j.title} ↗</a></div>
+                <div style="font-size:0.75rem; color:var(--text-muted); margin-top:0.25rem; display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: center;">
+                  <span>Employer: <strong>${j.hiring_organisation || 'Company'}</strong></span>
+                  ${j.date_posted ? `<span>Posted: <strong>${j.date_posted}</strong></span>` : ''}
+                  <span class="badge" style="background: var(--accent-subtle); color: var(--accent);">Open Career Opportunity</span>
+                  ${j.matched_entity_proof ? `<span style="color: var(--success); font-weight: 500;">✓ ${j.matched_entity_proof}</span>` : ''}
+                </div>
               </div>
             `).join('');
           }
@@ -1724,12 +1776,15 @@
           p.innerHTML = `
             <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 1rem; margin-top: 0.5rem;">
               <div class="source-block">
-                <div class="source-label">Primary Website Status</div>
-                ${web ? `
+                <div class="source-label">Primary Website & Activity Summary</div>
+                ${webUrl ? `
                   <div style="font-weight:700; margin-bottom:0.25rem;">
-                    <a href="${web}" target="_blank" rel="noopener noreferrer" style="color:var(--primary);">${web}</a>
+                    <a href="${webUrl}" target="_blank" rel="noopener noreferrer" style="color:var(--primary);">${webUrl} ↗</a>
                   </div>
-                  <div style="font-size:0.8rem; color:var(--text-muted);">
+                  <div style="font-size:0.8rem; color:var(--text-muted); margin-bottom: 0.35rem;">
+                    ${webDesc || 'Verified company-owned digital domain.'}
+                  </div>
+                  <div style="font-size:0.75rem; color:var(--text-muted);">
                     ${isSubsidiary ? '⚠️ Disclosed parent group affiliation. Group social/news isolated.' : '✓ Verified company-owned domain.'}
                   </div>
                 ` : '<div style="color:var(--text-muted);">No primary web address recorded in registry</div>'}
@@ -1746,12 +1801,22 @@
               </div>
 
               <div class="source-block" style="grid-column: 1 / -1;">
-                <div class="source-label">Rule 3: Verified Dated News Posts</div>
+                <div class="source-label">📰 Verified Company News (Dated Item Linked from Company Site)</div>
                 <div style="margin-top:0.4rem;">
-                  ${newsList}
+                  ${newsHtml}
                 </div>
-                <div style="font-size:0.75rem; color:var(--text-muted); margin-top:0.4rem;">
-                  Filtered: Menu items ("See more news"), products, and modified/feed-updated dates rejected.
+                <div style="font-size:0.75rem; color:var(--text-muted); margin-top:0.3rem;">
+                  Rule: Dated post with genuine publish date (not modified/feed date), linked from company site, page explicitly showing company name or orgnr.
+                </div>
+              </div>
+
+              <div class="source-block" style="grid-column: 1 / -1;">
+                <div class="source-label">💼 Open Job Postings (Linked from Company Site)</div>
+                <div style="margin-top:0.4rem;">
+                  ${jobsHtml}
+                </div>
+                <div style="font-size:0.75rem; color:var(--text-muted); margin-top:0.3rem;">
+                  Rule: Open posting linked from company's own site, page explicitly showing company name or orgnr.
                 </div>
               </div>
             </div>
@@ -2009,6 +2074,12 @@
           const web1 = getClaim(c1, 'website.url');
           const web2 = getClaim(c2, 'website.url');
 
+          const news1 = (c1.claims || []).find(cl => cl.field === 'company_news' || cl.field.startsWith('website_article'))?.value;
+          const news2 = (c2.claims || []).find(cl => cl.field === 'company_news' || cl.field.startsWith('website_article'))?.value;
+
+          const job1 = (c1.claims || []).find(cl => cl.field === 'job_posting' || cl.field.startsWith('job_posting'))?.value;
+          const job2 = (c2.claims || []).find(cl => cl.field === 'job_posting' || cl.field.startsWith('job_posting'))?.value;
+
           const evCount1 = (c1.evidence || []).length;
           const evCount2 = (c2.evidence || []).length;
 
@@ -2085,6 +2156,64 @@
                 </td>
                 <td>
                   ${web2 ? `<a href="${web2}" target="_blank" rel="noopener noreferrer" style="color:var(--primary);">${web2}</a>` : 'None in registry'}
+                </td>
+              </tr>
+              <tr>
+                <th>Company News (Verified Post)</th>
+                <td>
+                  ${news1 ? `
+                    <div style="font-weight: 600; margin-bottom: 0.2rem;">
+                      <a href="${news1.url}" target="_blank" rel="noopener noreferrer" style="color: var(--primary); text-decoration: none;">${news1.title} ↗</a>
+                    </div>
+                    <div style="font-size: 0.8rem; color: var(--text-muted); margin-bottom: 0.2rem;">
+                      📅 Published: <strong>${news1.publish_date || 'Dated post'}</strong>
+                    </div>
+                    <div style="font-size: 0.75rem; color: var(--success); background: rgba(30, 142, 62, 0.08); padding: 0.2rem 0.4rem; border-radius: 4px; display: inline-block;">
+                      ✓ ${news1.entity_proof_on_page || 'Identity verified on page'}
+                    </div>
+                  ` : '<span style="color:var(--text-muted); font-size:0.85rem;">No dated news with on-page identity match</span>'}
+                </td>
+                <td>
+                  ${news2 ? `
+                    <div style="font-weight: 600; margin-bottom: 0.2rem;">
+                      <a href="${news2.url}" target="_blank" rel="noopener noreferrer" style="color: var(--primary); text-decoration: none;">${news2.title} ↗</a>
+                    </div>
+                    <div style="font-size: 0.8rem; color: var(--text-muted); margin-bottom: 0.2rem;">
+                      📅 Published: <strong>${news2.publish_date || 'Dated post'}</strong>
+                    </div>
+                    <div style="font-size: 0.75rem; color: var(--success); background: rgba(30, 142, 62, 0.08); padding: 0.2rem 0.4rem; border-radius: 4px; display: inline-block;">
+                      ✓ ${news2.entity_proof_on_page || 'Identity verified on page'}
+                    </div>
+                  ` : '<span style="color:var(--text-muted); font-size:0.85rem;">No dated news with on-page identity match</span>'}
+                </td>
+              </tr>
+              <tr>
+                <th>Open Job Posting</th>
+                <td>
+                  ${job1 ? `
+                    <div style="font-weight: 600; margin-bottom: 0.2rem;">
+                      <a href="${job1.url}" target="_blank" rel="noopener noreferrer" style="color: var(--primary); text-decoration: none;">${job1.title} ↗</a>
+                    </div>
+                    <div style="font-size: 0.8rem; color: var(--text-muted); margin-bottom: 0.2rem;">
+                      💼 ${job1.hiring_organization || 'Company career portal'} ${job1.date_posted ? `• Posted: ${job1.date_posted}` : ''}
+                    </div>
+                    <div style="font-size: 0.75rem; color: var(--success); background: rgba(30, 142, 62, 0.08); padding: 0.2rem 0.4rem; border-radius: 4px; display: inline-block;">
+                      ✓ ${job1.entity_proof_on_page || 'Identity verified on page'}
+                    </div>
+                  ` : '<span style="color:var(--text-muted); font-size:0.85rem;">No active posting with on-page identity match</span>'}
+                </td>
+                <td>
+                  ${job2 ? `
+                    <div style="font-weight: 600; margin-bottom: 0.2rem;">
+                      <a href="${job2.url}" target="_blank" rel="noopener noreferrer" style="color: var(--primary); text-decoration: none;">${job2.title} ↗</a>
+                    </div>
+                    <div style="font-size: 0.8rem; color: var(--text-muted); margin-bottom: 0.2rem;">
+                      💼 ${job2.hiring_organization || 'Company career portal'} ${job2.date_posted ? `• Posted: ${job2.date_posted}` : ''}
+                    </div>
+                    <div style="font-size: 0.75rem; color: var(--success); background: rgba(30, 142, 62, 0.08); padding: 0.2rem 0.4rem; border-radius: 4px; display: inline-block;">
+                      ✓ ${job2.entity_proof_on_page || 'Identity verified on page'}
+                    </div>
+                  ` : '<span style="color:var(--text-muted); font-size:0.85rem;">No active posting with on-page identity match</span>'}
                 </td>
               </tr>
               <tr>

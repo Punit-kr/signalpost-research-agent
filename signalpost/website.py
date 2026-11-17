@@ -316,6 +316,116 @@ def is_valid_news_post(article: dict[str, Any], page_url: str = "") -> tuple[boo
     return True, "Valid dated news post"
 
 
+def verify_page_shows_company_identity(
+    raw: bytes | str,
+    company_name: str | None,
+    orgnr: str
+) -> tuple[bool, str]:
+    """Verify that a page explicitly shows the company's name or 9-digit orgnr.
+
+    Rule: Only add a news post or job posting if the page shows the company's name or org number.
+    """
+    if isinstance(raw, bytes):
+        text = raw.decode("utf-8", errors="ignore")
+    else:
+        text = str(raw or "")
+
+    # 1. Check exact 9-digit organisation number
+    if orgnr:
+        clean_org = re.sub(r"\D", "", orgnr)
+        if clean_org in text or (len(clean_org) == 9 and f"{clean_org[:3]} {clean_org[3:6]} {clean_org[6:]}" in text):
+            return True, f"Exact organisation number {clean_org} is displayed on the page"
+        compact_digits = re.sub(r"\D", "", text)
+        if clean_org and clean_org in compact_digits:
+            return True, f"Organisation number {clean_org} matched in page digit stream"
+
+    # 2. Check company name or distinctive name tokens
+    if company_name:
+        name_clean = str(company_name).strip()
+        low_text = text.lower()
+
+        # Exact name as printed or normalized name
+        norm_name = _norm_name(name_clean)
+        if norm_name and norm_name in low_text:
+            return True, f"Company name '{company_name}' is displayed on the page"
+
+        tokens = _tokens(company_name)
+        legal_and_generic = {"as", "asa", "ab", "da", "konsern", "group", "holdings", "holding", "norge", "norway"}
+        distinctive = [t for t in tokens if t not in legal_and_generic]
+        if not distinctive:
+            distinctive = tokens
+
+        # If all distinctive tokens appear on the page
+        if distinctive and all(t in low_text for t in distinctive):
+            return True, f"Company identity tokens ({', '.join(distinctive)}) appear on the page"
+
+    return False, "Page does not show the company's name or organisation number"
+
+
+NORWEGIAN_MONTHS = {
+    "januar": "01", "jan": "01",
+    "februar": "02", "feb": "02",
+    "mars": "03", "mar": "03",
+    "april": "04", "apr": "04",
+    "mai": "05",
+    "juni": "06", "jun": "06",
+    "juli": "07", "jul": "07",
+    "august": "08", "aug": "08",
+    "september": "09", "sep": "09", "sept": "09",
+    "oktober": "10", "okt": "10",
+    "november": "11", "nov": "11",
+    "desember": "12", "des": "12",
+}
+
+
+def extract_date_from_text(text: str) -> str | None:
+    """Extract a valid published date (YYYY-MM-DD) from a text string."""
+    if not text:
+        return None
+    # 1. ISO format: 2025-05-12 or 2026/01/20
+    m_iso = re.search(r"\b(202[0-6])[-/](0[1-9]|1[0-2])[-/](0[1-9]|[12]\d|3[01])\b", text)
+    if m_iso:
+        return f"{m_iso.group(1)}-{m_iso.group(2)}-{m_iso.group(3)}"
+
+    # 2. Dot format: 12.05.2025 or 12.5.2025
+    m_dot = re.search(r"\b(0?[1-9]|[12]\d|3[01])\.(0?[1-9]|1[0-2])\.(202[0-6])\b", text)
+    if m_dot:
+        d, m, y = m_dot.group(1).zfill(2), m_dot.group(2).zfill(2), m_dot.group(3)
+        return f"{y}-{m}-{d}"
+
+    # 3. Word format: 15. mars 2025, 2. januar 2026
+    m_word = re.search(r"\b(0?[1-9]|[12]\d|3[01])\.?\s+([a-zA-ZæøåÆØÅ]+)\s+(202[0-6])\b", text)
+    if m_word:
+        d = m_word.group(1).zfill(2)
+        month_name = m_word.group(2).lower()
+        y = m_word.group(3)
+        if month_name in NORWEGIAN_MONTHS:
+            return f"{y}-{NORWEGIAN_MONTHS[month_name]}-{d}"
+
+    return None
+
+
+NEWS_PATH_REGEX = re.compile(
+    r"/(?:news|nyheter|aktuelt|presse|pressemeldinger|artikler|blog|media|meldinger)/(?:[a-zA-Z0-9_\-\.\/]+)",
+    re.I
+)
+
+JOB_PATH_REGEX = re.compile(
+    r"/(?:karriere|jobb|jobs|careers|stillinger|ledige-stillinger|vacancies)/(?:[a-zA-Z0-9_\-\.\/]+)",
+    re.I
+)
+
+JOB_ROLE_KEYWORDS = {
+    "utvikler", "developer", "konsulent", "consultant", "ingeniør", "engineer",
+    "leder", "manager", "lead", "director", "prosjektleder", "project manager",
+    "rådgiver", "advisor", "spesialist", "specialist", "analytiker", "analyst",
+    "advokat", "jurist", "økonom", "controller", "regnskapsfører", "accountant",
+    "mekaniker", "operatør", "sjåfør", "sykepleier", "lege", "arkitekt", "architect",
+    "designer", "selger", "salgskonsulent", "key account", "assistent", "trainee"
+}
+
+
+
 class PageParser(HTMLParser):
     def __init__(self, base_url: str):
         super().__init__(convert_charrefs=True)
@@ -555,6 +665,50 @@ def extract_page_facts(raw: bytes, url: str) -> dict[str, Any]:
             jobs.append(obj)
         if "article" in types or "newsarticle" in types or "pressrelease" in types:
             other.append(obj)
+
+    # 2. Extract HTML articles and news posts from page links and dates
+    seen_article_urls = {str(a.get("url")) for a in other if a.get("url")}
+    for link in parser.links:
+        link_url = link.get("url", "")
+        link_text = link.get("text", "").strip()
+        if not link_url or not link_text or link_url in seen_article_urls:
+            continue
+        is_news_link = bool(NEWS_PATH_REGEX.search(link_url))
+        date_in_text = extract_date_from_text(link_text) or extract_date_from_text(link_url)
+        if is_news_link or (date_in_text and len(link_text.split()) >= 3):
+            pub_date = date_in_text
+            if not pub_date and parser.times:
+                for tm in parser.times:
+                    extracted = extract_date_from_text(tm.get("datetime", "") or tm.get("text", ""))
+                    if extracted:
+                        pub_date = extracted
+                        break
+            if pub_date:
+                candidate = {"title": link_text, "datePublished": pub_date, "url": link_url}
+                is_val, _ = is_valid_news_post(candidate, link_url)
+                if is_val:
+                    other.append(candidate)
+                    seen_article_urls.add(link_url)
+
+    # 3. Extract HTML jobs from career/job links
+    seen_job_urls = {str(j.get("url")) for j in jobs if j.get("url")}
+    for link in parser.links:
+        link_url = link.get("url", "")
+        link_text = link.get("text", "").strip()
+        if not link_url or not link_text or link_url in seen_job_urls:
+            continue
+        is_job_path = bool(JOB_PATH_REGEX.search(link_url))
+        words_low = {w.lower() for w in link_text.split()}
+        has_role_keyword = bool(words_low & JOB_ROLE_KEYWORDS)
+        norm_txt = link_text.lower()
+        if norm_txt in {"karriere", "careers", "jobs", "jobb", "stillinger", "ledige stillinger", "se ledige stillinger", "work with us", "jobb hos oss", "bli med oss"}:
+            continue
+        if is_job_path or (has_role_keyword and len(link_text.split()) >= 2):
+            job_date = extract_date_from_text(link_text)
+            candidate_job = {"title": link_text, "url": link_url, "datePosted": job_date}
+            jobs.append(candidate_job)
+            seen_job_urls.add(link_url)
+
     sorted_socials = sorted(socials.values(), key=lambda x: (x["platform"], x["url"]))
     return {"parser": parser, "title": parser.title or None, "description": description,
             "headings": parser.headings[:12], "links": parser.links, "jsonld": jsonld,

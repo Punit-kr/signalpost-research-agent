@@ -37,7 +37,17 @@ from .website import (
     match_company_website,
     pick_followup_links,
     validate_social_account,
+    verify_page_shows_company_identity,
 )
+
+CORE_REGISTRY_FIELDS = {
+    "official_name",
+    "organisation_number",
+    "legal_form",
+    "industry_classifications",
+    "business_address",
+    "employees",
+}
 
 
 def utc_from_epoch(value: float) -> str:
@@ -188,9 +198,10 @@ class ResearchRunner:
         if meta:
             excerpt = stable_json({"organisation_number": record.organisation_number, "values": record.values})
             evidence_by_field: dict[str, list[str]] = {}
-            # Each published fact receives an evidence item whose span contains the exact registry value.
+            # Replace repetitive registry boilerplate: only emit core anchor identity fields
             for field, value in record.values.items():
                 if value is None or field == "source_record_type": continue
+                if field not in CORE_REGISTRY_FIELDS: continue
                 eid, _ = self._save_evidence(builder, orgnr=record.organisation_number, source_url=meta["url"],
                     source_class=meta["source_class"], fetched_at=meta["fetched_at"], status=meta["status"],
                     content_type=meta.get("content_type"), body=meta["body"],
@@ -214,7 +225,7 @@ class ResearchRunner:
             excerpt=f"Exact-organisation endpoint response for {record.organisation_number}: {stable_json(record.values)}",
             match="verified", title="Brønnøysund Register Centre entity endpoint", confidence=0.995)
         for field, value in record.values.items():
-            if value is not None and field != "source_record_type":
+            if value is not None and field != "source_record_type" and field in CORE_REGISTRY_FIELDS:
                 builder.add_claim(field, value, availability="available", confidence=0.995, evidence_ids=[eid])
         return {"organisation_number": record.organisation_number, "official_name": record.values.get("official_name"),
                 "source_url": url, "match_status": "verified", "confidence": 0.995, "evidence_ids": [eid]}
@@ -332,41 +343,71 @@ class ResearchRunner:
                               notes="Contact telephone numbers published on verified website.")
         jobs_published = 0
         name = record.values.get("official_name")
-        for index, job in enumerate(facts.get("job_postings", [])[:20]):
-            employer = job.get("hiringOrganization") or {}
-            employer_name = employer.get("name") if isinstance(employer, dict) else employer
-            if employer_name and not self._names_close(str(name or ""), str(employer_name)):
-                continue
-            title = job.get("title")
-            if not title: continue
-            value = {"title": str(title)[:300], "url": job.get("url") or response.final_url,
-                     "date_posted": job.get("datePosted"), "valid_through": job.get("validThrough"),
-                     "employment_type": job.get("employmentType"), "hiring_organisation": employer_name or name}
-            job_eid, _ = self._save_evidence(builder, orgnr=orgnr, source_url=response.final_url,
-                source_class="company_owned_website", fetched_at=response.retrieved_at or now_iso(), status=response.status,
-                content_type=response.headers.get("content-type"), body=response.body,
-                excerpt=f"Structured JobPosting JSON-LD: {stable_json(value)}", match="verified", title=str(title),
-                confidence=0.93, published_at=str(value.get("date_posted")) if value.get("date_posted") else None,
-                validation_notes="Employer name matched the registered company or is absent; page belongs to the registry-listed domain.")
-            builder.add_claim(f"job_posting.{hashlib.sha256(stable_json(value).encode()).hexdigest()[:12]}", value,
-                              confidence=0.93, evidence_ids=[job_eid], effective_date=value.get("date_posted"))
-            jobs_published += 1
-        if not jobs_published and any(x.get("kind") == "jobs" for x in pick_followup_links(facts.get("links", []), response.final_url)):
-            builder.add_claim("job_postings_on_homepage", None, availability="not_available", confidence=0.7,
-                              evidence_ids=[eid], notes="A careers/jobs link was found, but no JobPosting was embedded on the homepage; the job page may be checked separately.")
+        page_has_id, id_reason = verify_page_shows_company_identity(response.body, name, orgnr)
 
-        # Check that news items are real, dated posts (reject menu labels like 'See more news' and product pages; reject modified/updated dates)
-        for article in facts.get("articles", [])[:10]:
-            is_valid, art_reason = is_valid_news_post(article, article.get("url") or response.final_url)
-            if not is_valid:
-                continue
-            title = article.get("headline") or article.get("name") or article.get("title")
-            date = article.get("datePublished") or article.get("pubDate") or article.get("dateCreated")
-            link = article.get("url")
-            value = {"title": str(title)[:300], "date_published": str(date), "url": link or response.final_url}
-            builder.add_claim(f"website_article.{hashlib.sha256(stable_json(value).encode()).hexdigest()[:12]}", value,
-                              confidence=0.90, evidence_ids=[eid], effective_date=str(date),
-                              notes="Verified real dated news post published by official website.")
+        # Check job postings: only add one if the page shows the company's name or org number
+        if page_has_id and not any(c.get("field") == "job_posting" for c in builder.claims):
+            for job in facts.get("job_postings", []):
+                employer = job.get("hiringOrganization") or {}
+                employer_name = employer.get("name") if isinstance(employer, dict) else employer
+                if employer_name and not self._names_close(str(name or ""), str(employer_name)):
+                    continue
+                title = str(job.get("title") or "").strip()
+                if not title or len(title) < 3 or title.lower() in MENU_AND_NAV_TITLES:
+                    continue
+                val_job = {
+                    "title": title[:300],
+                    "url": job.get("url") or response.final_url,
+                    "date_posted": job.get("datePosted"),
+                    "employment_type": job.get("employmentType"),
+                    "hiring_organisation": employer_name or name,
+                    "matched_entity_proof": id_reason
+                }
+                job_eid, _ = self._save_evidence(
+                    builder, orgnr=orgnr, source_url=val_job["url"],
+                    source_class="company_owned_website", fetched_at=response.retrieved_at or now_iso(), status=response.status,
+                    content_type=response.headers.get("content-type"), body=response.body,
+                    excerpt=f"Open job posting: {title}; {id_reason}", match="verified", title=title,
+                    confidence=0.96, published_at=str(val_job.get("date_posted")) if val_job.get("date_posted") else None,
+                    validation_notes=f"Open job posting linked from company site. Page displays company identity: {id_reason}"
+                )
+                builder.add_claim("job_posting", val_job, confidence=0.96, evidence_ids=[job_eid],
+                                  effective_date=val_job.get("date_posted"),
+                                  notes="Verified open job posting linked from company's own site with entity name/orgnr on page.")
+                builder.add_claim(f"job_posting.{hashlib.sha256(stable_json(val_job).encode()).hexdigest()[:12]}", val_job,
+                                  confidence=0.96, evidence_ids=[job_eid], effective_date=val_job.get("date_posted"))
+                jobs_published += 1
+                break
+
+        # Check news items: only add one if the page shows the company's name or org number
+        if page_has_id and not any(c.get("field") == "company_news" for c in builder.claims):
+            for article in facts.get("articles", []):
+                is_valid, art_reason = is_valid_news_post(article, article.get("url") or response.final_url)
+                if not is_valid:
+                    continue
+                title = str(article.get("headline") or article.get("name") or article.get("title") or "").strip()
+                date = str(article.get("datePublished") or article.get("pubDate") or article.get("dateCreated") or "")
+                link = article.get("url") or response.final_url
+                val_news = {
+                    "title": title[:300],
+                    "date_published": date,
+                    "url": link,
+                    "matched_entity_proof": id_reason
+                }
+                news_eid, _ = self._save_evidence(
+                    builder, orgnr=orgnr, source_url=link,
+                    source_class="company_owned_website", fetched_at=response.retrieved_at or now_iso(), status=response.status,
+                    content_type=response.headers.get("content-type"), body=response.body,
+                    excerpt=f"Verified dated news post: {title} ({date}); {id_reason}", match="verified", title=title,
+                    confidence=0.96, published_at=date,
+                    validation_notes=f"Dated news item linked from company's site. Page displays company identity: {id_reason}"
+                )
+                builder.add_claim("company_news", val_news, confidence=0.96, evidence_ids=[news_eid], effective_date=date,
+                                  notes="Verified dated news post linked from company's own site with entity name/orgnr on page.")
+                builder.add_claim(f"website_article.{hashlib.sha256(stable_json(val_news).encode()).hexdigest()[:12]}", val_news,
+                                  confidence=0.96, evidence_ids=[news_eid], effective_date=date,
+                                  notes="Verified real dated news post published by official website.")
+                break
 
         for link in pick_followup_links(facts.get("links", []), response.final_url, limit=12):
             link["orgnr"] = orgnr
@@ -414,33 +455,72 @@ class ResearchRunner:
             builder.add_claim(f"website_page.{kind}.{hashlib.sha256(response.final_url.encode()).hexdigest()[:10]}",
                               {"title": facts.get("title"), "url": response.final_url, "page_type": kind,
                                "description": facts.get("description")}, confidence=0.90, evidence_ids=[eid])
-        for i, job in enumerate(facts.get("job_postings", [])[:25]):
-            employer = job.get("hiringOrganization") or {}
-            employer_name = employer.get("name") if isinstance(employer, dict) else employer
-            if employer_name and not self._names_close(str(result.get("company_name") or ""), str(employer_name)):
-                continue
-            title = job.get("title")
-            if not title: continue
-            value = {"title": str(title)[:300], "url": job.get("url") or response.final_url,
-                     "date_posted": job.get("datePosted"), "valid_through": job.get("validThrough"),
-                     "employment_type": job.get("employmentType"), "hiring_organisation": employer_name or result.get("company_name")}
-            job_eid, _ = self._save_evidence(builder, orgnr=result["orgnr"], source_url=response.final_url,
-                source_class="company_owned_website", fetched_at=response.retrieved_at or now_iso(), status=response.status,
-                content_type=response.headers.get("content-type"), body=response.body,
-                excerpt=f"Structured JobPosting JSON-LD: {stable_json(value)}", match="verified", title=str(title),
-                confidence=0.93, published_at=str(value.get("date_posted")) if value.get("date_posted") else None,
-                validation_notes="Exact company match checked against the official company-name field.")
-            builder.add_claim(f"job_posting.{hashlib.sha256(stable_json(value).encode()).hexdigest()[:12]}", value,
-                              confidence=0.93, evidence_ids=[job_eid], effective_date=value.get("date_posted"))
-        for article in facts.get("articles", [])[:10]:
-            is_valid, _ = is_valid_news_post(article, article.get("url") or response.final_url)
-            if not is_valid: continue
-            title = article.get("headline") or article.get("name") or article.get("title")
-            date = article.get("datePublished") or article.get("pubDate") or article.get("dateCreated")
-            val = {"title": str(title)[:300], "date_published": str(date), "url": article.get("url") or response.final_url}
-            builder.add_claim(f"website_article.{hashlib.sha256(stable_json(val).encode()).hexdigest()[:12]}", val,
-                              confidence=0.90, evidence_ids=[eid], effective_date=str(date),
-                              notes="Verified real dated news post published by official website.")
+
+        page_has_id, id_reason = verify_page_shows_company_identity(response.body, result.get("company_name"), result["orgnr"])
+
+        # Check job postings: only add one if page shows company name or org number and not yet published
+        if page_has_id and not any(c.get("field") == "job_posting" for c in builder.claims):
+            for job in facts.get("job_postings", []):
+                employer = job.get("hiringOrganization") or {}
+                employer_name = employer.get("name") if isinstance(employer, dict) else employer
+                if employer_name and not self._names_close(str(result.get("company_name") or ""), str(employer_name)):
+                    continue
+                title = str(job.get("title") or "").strip()
+                if not title or len(title) < 3 or title.lower() in MENU_AND_NAV_TITLES:
+                    continue
+                val_job = {
+                    "title": title[:300],
+                    "url": job.get("url") or response.final_url,
+                    "date_posted": job.get("datePosted"),
+                    "employment_type": job.get("employmentType"),
+                    "hiring_organisation": employer_name or result.get("company_name"),
+                    "matched_entity_proof": id_reason
+                }
+                job_eid, _ = self._save_evidence(
+                    builder, orgnr=result["orgnr"], source_url=val_job["url"],
+                    source_class="company_owned_website", fetched_at=response.retrieved_at or now_iso(), status=response.status,
+                    content_type=response.headers.get("content-type"), body=response.body,
+                    excerpt=f"Open job posting: {title}; {id_reason}", match="verified", title=title,
+                    confidence=0.96, published_at=str(val_job.get("date_posted")) if val_job.get("date_posted") else None,
+                    validation_notes=f"Open job posting linked from company site. Page displays company identity: {id_reason}"
+                )
+                builder.add_claim("job_posting", val_job, confidence=0.96, evidence_ids=[job_eid],
+                                  effective_date=val_job.get("date_posted"),
+                                  notes="Verified open job posting linked from company's own site with entity name/orgnr on page.")
+                builder.add_claim(f"job_posting.{hashlib.sha256(stable_json(val_job).encode()).hexdigest()[:12]}", val_job,
+                                  confidence=0.96, evidence_ids=[job_eid], effective_date=val_job.get("date_posted"))
+                break
+
+        # Check news items: only add one if page shows company name or org number and not yet published
+        if page_has_id and not any(c.get("field") == "company_news" for c in builder.claims):
+            for article in facts.get("articles", []):
+                is_valid, _ = is_valid_news_post(article, article.get("url") or response.final_url)
+                if not is_valid:
+                    continue
+                title = str(article.get("headline") or article.get("name") or article.get("title") or "").strip()
+                date = str(article.get("datePublished") or article.get("pubDate") or article.get("dateCreated") or "")
+                link = article.get("url") or response.final_url
+                val_news = {
+                    "title": title[:300],
+                    "date_published": date,
+                    "url": link,
+                    "matched_entity_proof": id_reason
+                }
+                news_eid, _ = self._save_evidence(
+                    builder, orgnr=result["orgnr"], source_url=link,
+                    source_class="company_owned_website", fetched_at=response.retrieved_at or now_iso(), status=response.status,
+                    content_type=response.headers.get("content-type"), body=response.body,
+                    excerpt=f"Verified dated news post: {title} ({date}); {id_reason}", match="verified", title=title,
+                    confidence=0.96, published_at=date,
+                    validation_notes=f"Dated news item linked from company's site. Page displays company identity: {id_reason}"
+                )
+                builder.add_claim("company_news", val_news, confidence=0.96, evidence_ids=[news_eid], effective_date=date,
+                                  notes="Verified dated news post linked from company's own site with entity name/orgnr on page.")
+                builder.add_claim(f"website_article.{hashlib.sha256(stable_json(val_news).encode()).hexdigest()[:12]}", val_news,
+                                  confidence=0.96, evidence_ids=[news_eid], effective_date=date,
+                                  notes="Verified real dated news post published by official website.")
+                break
+
         if facts.get("social_links"):
             for soc in facts["social_links"][:10]:
                 is_valid, _ = validate_social_account(

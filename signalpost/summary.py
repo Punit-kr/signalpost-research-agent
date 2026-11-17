@@ -108,7 +108,16 @@ def build_summary(orgnr: str, claims: list[dict[str, Any]], identity_anchor: dic
                     sentences.append(f"Comparing reporting periods of equal length ({comp.get('period_length_months', 12)} months) older to newer: revenue changed from {rev.get('older_amount')} (FY{rev.get('older_period')}) to {rev.get('newer_amount')} (FY{rev.get('newer_period')}){cite}.")
 
     # 5. Hiring, social media & announcements
-    jobs = [x for x in claims if x.get("field", "").startswith("job_posting.") and x.get("availability") == "available"]
+    seen_job_keys = set()
+    jobs = []
+    for x in claims:
+        f = x.get("field", "")
+        if (f == "job_posting" or f.startswith("job_posting.")) and x.get("availability") == "available":
+            v = x.get("value") or {}
+            key = (v.get("title"), v.get("url")) if isinstance(v, dict) else str(v)
+            if key not in seen_job_keys:
+                seen_job_keys.add(key)
+                jobs.append(x)
     if jobs:
         job_eids = dict.fromkeys(e for x in jobs for e in x.get('evidence_ids', []))
         sentences.append(f"The company website published {len(jobs)} active job posting record(s) [{','.join(job_eids)}].")
@@ -119,7 +128,16 @@ def build_summary(orgnr: str, claims: list[dict[str, Any]], identity_anchor: dic
         soc_eids = dict.fromkeys(e for x in socials for e in x.get('evidence_ids', []))
         sentences.append(f"Verified company-controlled presence was confirmed on: {', '.join(plat_names)} [{','.join(soc_eids)}].")
 
-    articles = [x for x in claims if x.get("field", "").startswith("website_article.") and x.get("availability") == "available"]
+    seen_art_keys = set()
+    articles = []
+    for x in claims:
+        f = x.get("field", "")
+        if (f == "company_news" or f.startswith("website_article.")) and x.get("availability") == "available":
+            v = x.get("value") or {}
+            key = (v.get("title"), v.get("url")) if isinstance(v, dict) else str(v)
+            if key not in seen_art_keys:
+                seen_art_keys.add(key)
+                articles.append(x)
     if articles:
         art_eids = dict.fromkeys(e for x in articles for e in x.get('evidence_ids', []))
         sentences.append(f"The official website exposed {len(articles)} verified, dated article or announcement record(s) in the pages checked [{','.join(art_eids)}].")

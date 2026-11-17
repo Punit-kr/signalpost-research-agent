@@ -546,6 +546,66 @@ class SignalpostValidationPolicyTests(unittest.TestCase):
         self.assertEqual(metric["newer_amount"], "1 500 000")
         self.assertEqual(metric["direction"], "older_to_newer")
 
+    def test_page_shows_company_name_or_org_number_required_for_news_and_jobs(self):
+        from signalpost.website import verify_page_shows_company_identity
+
+        company_name = "Equinor ASA"
+        orgnr = "923609016"
+
+        # 1. Page with exact orgnr passes
+        page_with_orgnr = b"<html><body>Footer: Organisasjonsnummer: 923 609 016</body></html>"
+        ok, reason = verify_page_shows_company_identity(page_with_orgnr, company_name, orgnr)
+        self.assertTrue(ok)
+        self.assertIn("923609016", reason)
+
+        # 2. Page with company name passes
+        page_with_name = b"<html><body><h1>Velkommen til Equinor ASA</h1></body></html>"
+        ok, reason = verify_page_shows_company_identity(page_with_name, company_name, orgnr)
+        self.assertTrue(ok)
+        self.assertIn("Equinor", reason)
+
+        # 3. Page with unrelated name and no orgnr fails
+        unrelated_page = b"<html><body><h1>Daily News Portal Norway</h1><p>General tech news article</p></body></html>"
+        ok, reason = verify_page_shows_company_identity(unrelated_page, company_name, orgnr)
+        self.assertFalse(ok)
+        self.assertIn("does not show", reason.lower())
+
+    def test_only_core_registry_fields_emitted_and_boilerplate_omitted(self):
+        from signalpost.registry import normalize_registry_record
+        from signalpost.runner import CORE_REGISTRY_FIELDS
+
+        raw_api = {
+            "organisasjonsnummer": "999888777",
+            "navn": "Test Enterprise AS",
+            "organisasjonsform": {"kode": "AS", "beskrivelse": "Aksjeselskap"},
+            "naeringskode1": {"kode": "62.010", "beskrivelse": "Programmering"},
+            "registrertIMva": True,
+            "konkurs": False,
+            "underAvvikling": False,
+            "underTvangsavviklingEllerTvangsopplosning": False,
+            "forretningsadresse": {"kommune": "OSLO", "postnummer": "0150"},
+            "stiftelsesdato": "2020-01-01",
+            "registreringsdatoEnhetsregisteret": "2020-01-15",
+            "antallAnsatte": 15
+        }
+        rec = normalize_registry_record(raw_api)
+
+        # Core anchor fields are in CORE_REGISTRY_FIELDS
+        self.assertIn("official_name", CORE_REGISTRY_FIELDS)
+        self.assertIn("organisation_number", CORE_REGISTRY_FIELDS)
+        self.assertIn("legal_form", CORE_REGISTRY_FIELDS)
+        self.assertIn("industry_classifications", CORE_REGISTRY_FIELDS)
+
+        # Repetitive registry boilerplate fields that earn no credit are excluded
+        self.assertNotIn("vat_registered", CORE_REGISTRY_FIELDS)
+        self.assertNotIn("under_bankruptcy", CORE_REGISTRY_FIELDS)
+        self.assertNotIn("under_liquidation", CORE_REGISTRY_FIELDS)
+        self.assertNotIn("under_compulsory_liquidation", CORE_REGISTRY_FIELDS)
+        self.assertNotIn("municipality", CORE_REGISTRY_FIELDS)
+        self.assertNotIn("foundation_date", CORE_REGISTRY_FIELDS)
+        self.assertNotIn("registration_date", CORE_REGISTRY_FIELDS)
+
+
 
 if __name__ == "__main__":
     unittest.main()
